@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    业务逻辑层：Models / Services / Interfaces。不含 View、不含 ViewModel。
+    TFM 必须是 net8.0-windows + UseWPF，原因有两个（都由需求第五/六节决定）：
+      1. IIconService 返回 BitmapSource（WPF 类型）；
+      2. AppScannerService 要读注册表 App Paths —— net8.0-windows 自带 Microsoft.Win32.Registry，
+         若用纯 net8.0 则需额外引包且会触发 CA1416 平台告警。
+  -->
+  <PropertyGroup>
+    <!--
+      平台版本带到 10.0.22621：PDF 预览要用系统自带的 Windows.Data.Pdf（WinRT 投影）。
+      这只影响编译期引用（投影包由 .NET SDK 从 NuGet 拉，机器上不装 Windows SDK 也能编），
+      运行期最低仍是 TargetPlatformMinVersion 那一版，Win10 19041 及以后都能跑。
+    -->
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>DeskMate.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WPF 项目集的隐式 using 里没有 System.IO / Concurrent，这里统一补齐 -->
+    <Using Include="System.IO" />
+    <Using Include="System.Collections.Concurrent" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.3" />
+    <PackageReference Include="Microsoft.International.Converters.PinYinConverter" Version="1.0.0" />
+    <!-- 文本预览要按 GB18030 兜底解老工程的中文注释，.NET 自带的编码表里没有它 -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DeskMate.Interop\DeskMate.Interop.csproj" />
+  </ItemGroup>
+
+</Project>

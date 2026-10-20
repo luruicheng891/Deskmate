@@ -1,0 +1,197 @@
+<UserControl x:Class="DeskMate.App.Controls.DockItemControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             IsTabStop="False"
+             Focusable="False">
+
+    <UserControl.Resources>
+
+        <!--
+          Dock 图标的动效全部由 Storyboard 完成（不引第三方动画库）。
+          RenderTransformOrigin 取 0.5,1：底部停靠时图标向上生长，下边缘不动，
+          看起来才像被「托」在桌面上。
+        -->
+        <Style x:Key="DockGlyphStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="RenderTransformOrigin" Value="0.5,1" />
+            <Setter Property="RenderTransform">
+                <Setter.Value>
+                    <ScaleTransform ScaleX="1" ScaleY="1" />
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid Background="Transparent">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Trigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                 To="1.35" Duration="0:0:0.18">
+                                    <DoubleAnimation.EasingFunction>
+                                        <BackEase EasingMode="EaseOut" Amplitude="0.45" />
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                 To="1.35" Duration="0:0:0.18">
+                                    <DoubleAnimation.EasingFunction>
+                                        <BackEase EasingMode="EaseOut" Amplitude="0.45" />
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.EnterActions>
+                    <Trigger.ExitActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                 To="1" Duration="0:0:0.16">
+                                    <DoubleAnimation.EasingFunction>
+                                        <CircleEase EasingMode="EaseOut" />
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                 To="1" Duration="0:0:0.16">
+                                    <DoubleAnimation.EasingFunction>
+                                        <CircleEase EasingMode="EaseOut" />
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.ExitActions>
+                </Trigger>
+
+                <!-- 按下时轻微回缩，松手由 IsMouseOver 的 Exit/Enter 动画接管回弹。 -->
+                <Trigger Property="IsPressed" Value="True">
+                    <Trigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                 To="1.15" Duration="0:0:0.08" />
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                 To="1.15" Duration="0:0:0.08" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.EnterActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+    </UserControl.Resources>
+
+    <StackPanel Orientation="Horizontal">
+
+        <!-- 运行区与固定区的分界。方向跟着 Dock 摆，横着贴边时是一条竖线。 -->
+        <Border x:Name="Separator"
+                VerticalAlignment="Center"
+                Background="{DynamicResource StrokeBrush}"
+                Visibility="{Binding SeparatorVisibility}">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Width" Value="1" />
+                    <Setter Property="Height" Value="26" />
+                    <Setter Property="Margin" Value="3,0,5,0" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding DataContext.IsVertical, RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                            <Setter Property="Width" Value="26" />
+                            <Setter Property="Height" Value="1" />
+                            <Setter Property="Margin" Value="0,3,0,5" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+        </Border>
+
+        <Button Style="{StaticResource DockGlyphStyle}"
+                Command="{Binding LaunchCommand}"
+                ToolTip="{Binding TooltipText}"
+                Width="{Binding IconSize}"
+                Height="{Binding IconSize}"
+                Focusable="False">
+            <Grid>
+                <!-- 正常图标 -->
+                <Image Source="{Binding Icon}"
+                       Stretch="Uniform"
+                       RenderOptions.BitmapScalingMode="HighQuality"
+                       Visibility="{Binding Icon, Converter={StaticResource NullToVis}, ConverterParameter=invert}" />
+
+                <!-- 取不到图标时的字母占位块，避免出现一排空白 -->
+                <Ellipse Fill="{DynamicResource AccentSoftBrush}"
+                         Visibility="{Binding Icon, Converter={StaticResource NullToVis}}" />
+                <TextBlock Text="{Binding DisplayName, Converter={StaticResource FirstLetter}}"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource AccentBrush}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           Visibility="{Binding Icon, Converter={StaticResource NullToVis}}" />
+
+                <!-- 运行指示：需求要求 4px 小圆点 -->
+                <Ellipse Width="4"
+                         Height="4"
+                         VerticalAlignment="Bottom"
+                         HorizontalAlignment="Center"
+                         Margin="0,0,0,-1"
+                         Fill="{DynamicResource SuccessBrush}"
+                         Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}" />
+
+                <!-- 目标已经不在了：右上角一个红点 + 悬停说明。少了它，用户看到的就是「图标正常，点了报错」。 -->
+                <Border Width="15"
+                        Height="15"
+                        CornerRadius="8"
+                        VerticalAlignment="Top"
+                        HorizontalAlignment="Right"
+                        Background="{DynamicResource InvalidBrush}"
+                        Visibility="{Binding InvalidVisibility}">
+                    <TextBlock Text="!"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextOnAccentBrush}" />
+                </Border>
+            </Grid>
+
+            <Button.ContextMenu>
+                <ContextMenu MinWidth="160">
+                    <MenuItem Header="打开" Command="{Binding LaunchCommand}" />
+                    <MenuItem Header="打开文件位置" Command="{Binding OpenLocationCommand}" />
+                    <!-- 只对当下真的开着窗口的图标出现；走 WM_CLOSE，程序要弹「保存吗」照样弹 -->
+                    <MenuItem Header="关闭窗口"
+                              ToolTip="关掉这个应用当前所有窗口（等于逐个点它们标题栏的 ×），不是退出进程"
+                              Command="{Binding CloseCommand}"
+                              Visibility="{Binding CloseVisibility}" />
+                    <MenuItem Header="重新选择目标"
+                              ToolTip="软件被卸载或换了目录时用：只改 Dock 里这条引用，不动任何文件"
+                              Command="{Binding RelocateCommand}"
+                              Visibility="{Binding RemoveVisibility}" />
+                    <MenuItem Header="重命名"
+                              ToolTip="只改 Dock 上显示的名字，磁盘上的文件名不变"
+                              Command="{Binding RenameCommand}"
+                              Visibility="{Binding RemoveVisibility}" />
+                    <MenuItem Header="更改图标"
+                              ToolTip="挑一个 .ico / .exe / .dll 当图标；点下去启动的还是原来那个程序"
+                              Command="{Binding ChangeIconCommand}"
+                              Visibility="{Binding RemoveVisibility}" />
+                    <MenuItem Header="恢复自动图标"
+                              Command="{Binding RestoreIconCommand}"
+                              Visibility="{Binding IconRestoreVisibility}" />
+                    <MenuItem Header="固定到最前" Command="{Binding PinToFrontCommand}" Visibility="{Binding RemoveVisibility}" />
+                    <MenuItem Header="固定到 Dock" Command="{Binding PinToDockCommand}" Visibility="{Binding PinVisibility}" />
+                    <Separator />
+                    <MenuItem Header="从 Dock 移除" Command="{Binding RemoveCommand}" Visibility="{Binding RemoveVisibility}" />
+                </ContextMenu>
+            </Button.ContextMenu>
+        </Button>
+    </StackPanel>
+</UserControl>

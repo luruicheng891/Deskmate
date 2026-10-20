@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    单元测试。TFM 跟随 DeskMate.Core（net8.0-windows10.0.22621.0），否则项目引用不兼容。
+    UseWPF 是为了能在 STA 线程上构造 BitmapSource，验证图标服务。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWPF>true</UseWPF>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>DeskMate.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Collections.Concurrent" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="6.0.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DeskMate.Core\DeskMate.Core.csproj" />
+    <!-- ViewModel 层的命令链路要能测到（例如「添加到 Dock」是否真的写进配置），所以引用主程序 -->
+    <ProjectReference Include="..\DeskMate.App\DeskMate.App.csproj" />
+  </ItemGroup>
+
+</Project>

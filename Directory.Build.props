@@ -1,0 +1,37 @@
+<Project>
+
+  <!--
+    全局默认属性。所有项目共享，项目内 csproj 只写差异化配置。
+  -->
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>AnyCPU;x64</Platforms>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+
+    <!-- 拼音库依赖中文文化信息，开启 InvariantGlobalization 会让拼音/排序失效 -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+
+    <!--
+      Microsoft.International.Converters.PinYinConverter 1.0.0 只发布 .NET Framework 程序集，
+      还原时会报 NU1701。已在本机 net8.0-windows 上实测可正常调用（ChineseChar.Pinyins），
+      因此屏蔽该告警而不是换库。
+    -->
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+
+    <!-- WPF 不支持裁剪；显式关闭避免 Release 发布时误开 -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <IsTrimmable>false</IsTrimmable>
+
+    <!-- 公开 API 写 XML 注释，但不因缺失注释产生 CS1591 噪音 -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!--
+    发布目录里保留 portable pdb（每个仅十余 KB）：需求要求全局异常捕获并写日志，
+    有 pdb 才能在 Serilog 里拿到行号，远程排障时价值远大于体积成本。
+  -->
+
+</Project>

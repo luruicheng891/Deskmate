@@ -1,0 +1,60 @@
+<Window x:Class="DeskMate.App.Views.TrayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:tb="http://www.hardcodet.net/taskbar"
+        Title="DeskMate"
+        Width="1"
+        Height="1"
+        Left="-32000"
+        Top="-32000"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Opacity="0"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        ResizeMode="NoResize"
+        Focusable="False"
+        Topmost="False"
+        IsHitTestVisible="False">
+
+    <!--
+      这个窗口本身不可见，存在的意义有两点：
+      1) 给全局热键与 WinEvent 钩子提供一个带消息泵的 HWND；
+      2) 承载托盘图标与右键菜单。
+    -->
+    <tb:TaskbarIcon x:Name="TrayIcon"
+                    IconSource="/Resources/Icons/DeskMate.ico"
+                    ToolTipText="DeskMate —— 桌面管家"
+                    NoLeftClickDelay="True"
+                    LeftClickCommand="{Binding ToggleDockCommand}">
+        <tb:TaskbarIcon.ContextMenu>
+            <ContextMenu MinWidth="200">
+                <MenuItem Header="{Binding DockMenuHeader}"
+                          Command="{Binding ToggleDockCommand}" />
+                <Separator />
+                <!-- 搜索原本只有 Alt+Space 一个入口，被输入法或别的程序占走就彻底点不到，所以托盘必须有一条鼠标路径 -->
+                <MenuItem Header="打开搜索"
+                          Command="{Binding ShowSearchCommand}"
+                          InputGestureText="{Binding SearchHotkeyText}" />
+                <MenuItem Header="打开启动台" Command="{Binding ShowLauncherCommand}" />
+                <MenuItem Header="文件夹管理" Command="{Binding ShowFolderManagerCommand}" />
+                <MenuItem Header="重新扫描应用"
+                          ToolTip="刚装或刚卸的软件同步到启动台与搜索，不用重启 DeskMate"
+                          Command="{Binding RescanAppsCommand}" />
+                <Separator />
+                <MenuItem Header="开机自启"
+                          IsCheckable="True"
+                          IsChecked="{Binding IsAutoStartEnabled, Mode=OneWay}"
+                          Command="{Binding ToggleAutoStartCommand}" />
+                <MenuItem Header="打开设置" Command="{Binding ShowSettingsCommand}" />
+                <Separator />
+                <MenuItem Header="使用说明"
+                          ToolTip="重新打开首次启动那个窗口，三条上手提示都在里面"
+                          Command="{Binding ShowWelcomeCommand}" />
+                <MenuItem Header="关于 DeskMate" Command="{Binding ShowAboutCommand}" />
+                <MenuItem Header="退出" Command="{Binding ExitCommand}" />
+            </ContextMenu>
+        </tb:TaskbarIcon.ContextMenu>
+    </tb:TaskbarIcon>
+</Window>

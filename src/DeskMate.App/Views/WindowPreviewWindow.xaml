@@ -1,0 +1,27 @@
+<Window x:Class="DeskMate.App.Views.WindowPreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DeskMate 窗口预览"
+        Width="1"
+        Height="1"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Focusable="False"
+        Topmost="True"
+        AllowsTransparency="False"
+        Background="{DynamicResource SurfaceBrush}"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+
+    <!--
+      缩略图由 DWM 直接合成在本窗口之上，所以这里只负责摆位置和接鼠标事件：
+      卡片矩形给 DWM 当目标区域，Canvas 负责点击命中与 DPI 换算。
+      不用 AllowsTransparency（分层窗口与 DWM 缩略图合不来），圆角交给 Win11 的 DWM 属性。
+    -->
+    <Canvas x:Name="Host"
+            MouseLeftButtonUp="OnHostMouseUp"
+            MouseEnter="OnHostMouseEnter"
+            MouseLeave="OnHostMouseLeave" />
+</Window>

@@ -1,0 +1,394 @@
+<UserControl x:Class="DeskMate.App.Controls.FilePreviewControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             FontFamily="{DynamicResource UiFontFamily}">
+
+    <UserControl.Resources>
+
+        <!-- 代码 / 正文：只读但可选，看代码不能选字等于没法用。
+             不换行是故意的：C 的对齐、表格状的 csv 一换行就毁了，横向滚动条承担那部分。 -->
+        <Style x:Key="CodeBoxStyle" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Microsoft YaHei UI" />
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="TextWrapping" Value="NoWrap" />
+            <Setter Property="AcceptsReturn" Value="True" />
+            <Setter Property="HorizontalScrollBarVisibility" Value="Auto" />
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="SelectionBrush" Value="{DynamicResource AccentSoftBrush}" />
+        </Style>
+
+        <Style x:Key="MdTextStyle" TargetType="TextBlock">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        </Style>
+
+        <!-- Markdown 的一种块。用样式触发而不是模板选择器：只有字号/前缀/底色三点差别，
+             为这点差别写一个 DataTemplateSelector 不划算。 -->
+        <DataTemplate x:Key="MarkdownBlockTemplate">
+            <Grid Margin="0,2">
+                <Border x:Name="CodeShell"
+                        Padding="10,8"
+                        CornerRadius="6"
+                        Background="{DynamicResource SurfaceHoverBrush}"
+                        Visibility="Collapsed">
+                    <TextBlock x:Name="CodeText"
+                               Style="{StaticResource MdTextStyle}"
+                               FontFamily="Cascadia Mono, Consolas, Microsoft YaHei UI"
+                               FontSize="12.5"
+                               Text="{Binding Text}" />
+                </Border>
+
+                <Border x:Name="Rule"
+                        Height="1"
+                        VerticalAlignment="Center"
+                        Background="{DynamicResource DividerBrush}"
+                        Visibility="Collapsed" />
+
+                <Grid x:Name="Plain">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock x:Name="Marker"
+                               Grid.Column="0"
+                               MinWidth="16"
+                               Margin="0,0,8,0"
+                               Style="{StaticResource MdTextStyle}"
+                               Foreground="{DynamicResource TextSecondaryBrush}" />
+
+                    <TextBlock x:Name="NumberMarker"
+                               Grid.Column="0"
+                               MinWidth="20"
+                               Margin="0,0,8,0"
+                               Style="{StaticResource MdTextStyle}"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               Text="{Binding Level, StringFormat={}{0}.}"
+                               Visibility="Collapsed" />
+
+                    <!-- 块内还要放行内格式（**粗** / `码`），所以这里给的是转换器生成的 TextBlock；
+                         ContentPresenter 会把 FontSize/Weight/Foreground 这些可继承属性往下传，
+                         触发器改一处，块里的每个片段都跟着变。 -->
+                    <ContentPresenter x:Name="Body"
+                                      Grid.Column="1"
+                                      TextElement.FontSize="13"
+                                      TextElement.Foreground="{DynamicResource TextPrimaryBrush}"
+                                      Content="{Binding Text, Converter={StaticResource MdInline}}" />
+                </Grid>
+            </Grid>
+
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Kind}" Value="Code">
+                    <Setter TargetName="CodeShell" Property="Visibility" Value="Visible" />
+                    <Setter TargetName="Plain" Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Divider">
+                    <Setter TargetName="Rule" Property="Visibility" Value="Visible" />
+                    <Setter TargetName="Plain" Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Heading">
+                    <Setter TargetName="Body" Property="TextElement.FontSize" Value="15" />
+                    <Setter TargetName="Body" Property="TextElement.FontWeight" Value="SemiBold" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Level}" Value="1">
+                    <Setter TargetName="Body" Property="TextElement.FontSize" Value="18" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Bullet">
+                    <Setter TargetName="Marker" Property="Text" Value="·" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Numbered">
+                    <Setter TargetName="NumberMarker" Property="Visibility" Value="Visible" />
+                    <Setter TargetName="Marker" Property="Visibility" Value="Hidden" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="Quote">
+                    <Setter TargetName="Body" Property="TextElement.FontStyle" Value="Italic" />
+                    <Setter TargetName="Body" Property="TextElement.Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                    <Setter TargetName="Marker" Property="Text" Value="&#x201C;" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- 同层文件胶囊：内容页顶上那一行。解决的是「看了这个文件就不知道同层还有什么」，
+             点一下就切过去，不用先退回列表再找。当前那枚高亮，人才知道自己站在哪。 -->
+        <Style x:Key="FileChipStyle" TargetType="Button">
+            <Setter Property="Height" Value="26" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+            <Setter Property="Padding" Value="9,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Shell"
+                                Padding="{TemplateBinding Padding}"
+                                CornerRadius="13"
+                                Background="{DynamicResource SurfaceHoverBrush}"
+                                BorderBrush="{DynamicResource StrokeBrush}"
+                                BorderThickness="1"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            </Trigger>
+                            <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+                                <Setter Property="FontWeight" Value="SemiBold" />
+                            </DataTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="FileChipTemplate">
+            <!-- 胶囊的 DataContext 是它自己（一枚 FileChipViewModel），命令在视图模型上，
+                 所以必须经祖先拿，别写成 {Binding SelectChipCommand}（那是静默失败的经典一条）。 -->
+            <Button Style="{StaticResource FileChipStyle}"
+                    Content="{Binding Name}"
+                    ToolTip="{Binding Path}"
+                    Command="{Binding DataContext.SelectChipCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                    CommandParameter="{Binding}" />
+        </DataTemplate>
+
+        <DataTemplate x:Key="ArchiveEntryTemplate">
+            <Grid Margin="0,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0"
+                           FontSize="12.5"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextPrimaryBrush}"
+                           Text="{Binding FullName}" />
+
+                <TextBlock Grid.Column="1"
+                           Margin="10,0,0,0"
+                           FontSize="12"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           Text="{Binding SizeText}" />
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 标题行：文件名 + 大小/日期，右边一排动作。相邻文件翻页放最左，因为它是「继续看下一个」而不是命令。 -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                <TextBlock Text="{Binding Name}"
+                           FontSize="13.5"
+                           FontWeight="SemiBold"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextPrimaryBrush}" />
+                <TextBlock Text="{Binding MetaLine}"
+                           Margin="0,2,0,0"
+                           FontSize="11"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextSecondaryBrush}" />
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Content="&#xE76B;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="同目录上一个文件"
+                        Command="{Binding PreviousFileCommand}"
+                        IsEnabled="{Binding CanGoPreviousFile}" />
+                <Button Content="&#xE76C;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="同目录下一个文件"
+                        Command="{Binding NextFileCommand}"
+                        IsEnabled="{Binding CanGoNextFile}" />
+                <Button Content="&#xE740;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="放大成独立窗口（长文、PDF 用这个看）"
+                        Command="{Binding PopoutCommand}" />
+                <Button Content="&#xE72C;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="重新读一遍（文件被别的程序改过）"
+                        Command="{Binding ReloadCommand}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- 同层文件胶囊：横向可滚一行，当前那枚高亮并自动滚进视野（见 code-behind）。
+             只有两个以上文件才出现，单文件目录里它是噪声。 -->
+        <ScrollViewer x:Name="ChipScroller"
+                      Grid.Row="1"
+                      Margin="0,0,0,8"
+                      Height="30"
+                      VerticalScrollBarVisibility="Disabled"
+                      HorizontalScrollBarVisibility="Hidden"
+                      Visibility="{Binding HasChips, Converter={StaticResource BoolToVis}}">
+            <ItemsControl x:Name="ChipHost"
+                          ItemTemplate="{StaticResource FileChipTemplate}"
+                          ItemsSource="{Binding Chips}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <!-- 正文：六块里同时只有一块是可见的，开关全在视图模型里算 -->
+        <Grid Grid.Row="2">
+            <TextBlock Text="正在读…"
+                       Style="{StaticResource CaptionTextStyle}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}" />
+
+            <ScrollViewer Style="{StaticResource ThinScrollViewerStyle}"
+                          VerticalScrollBarVisibility="Disabled"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Visibility="{Binding ShowError, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="{Binding Error}"
+                           Style="{StaticResource MdTextStyle}"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource InvalidBrush}" />
+            </ScrollViewer>
+
+            <StackPanel VerticalAlignment="Center"
+                        Visibility="{Binding ShowUnsupported, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="这个格式 DeskMate 看不了内容"
+                           Style="{StaticResource SectionTextStyle}" />
+                <TextBlock Margin="0,6,0,0"
+                           Style="{StaticResource MdTextStyle}"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           Text="{Binding UnsupportedHint}" />
+                <Button Content="用默认程序打开"
+                        Margin="0,12,0,0"
+                        HorizontalAlignment="Left"
+                        Style="{StaticResource GhostButtonStyle}"
+                        Command="{Binding OpenCommand}" />
+            </StackPanel>
+
+            <TextBox Style="{StaticResource CodeBoxStyle}"
+                     Text="{Binding Text, Mode=OneWay}"
+                     Visibility="{Binding ShowText, Converter={StaticResource BoolToVis}}" />
+
+            <ScrollViewer Style="{StaticResource ThinScrollViewerStyle}"
+                          VerticalScrollBarVisibility="Auto"
+                          Visibility="{Binding ShowMarkdown, Converter={StaticResource BoolToVis}}">
+                <ItemsControl ItemTemplate="{StaticResource MarkdownBlockTemplate}" ItemsSource="{Binding Blocks}" />
+            </ScrollViewer>
+
+            <Border Visibility="{Binding ShowImage, Converter={StaticResource BoolToVis}}"
+                    Background="{DynamicResource SurfaceHoverBrush}"
+                    CornerRadius="8">
+                <Viewbox Margin="8" Stretch="Uniform">
+                    <Image Source="{Binding Image}" Stretch="Uniform" />
+                </Viewbox>
+            </Border>
+
+            <!-- PDF：灰底 + 白纸描边，否则一页白纸上压在这块的白底上，看着就是「什么都没画」。
+                 横向滚动条必须 Disabled：ScrollViewer 在可滚的那一轴上给子元素无限宽度，
+                 Uniform 于是按原始像素排，一页 A4 会变成要左右拖着看的巨图。关掉横向滚动才等于「按栏宽适配」。 -->
+            <Border Background="{DynamicResource SurfaceHoverBrush}"
+                    CornerRadius="8"
+                    Visibility="{Binding ShowPdf, Converter={StaticResource BoolToVis}}">
+                <ScrollViewer x:Name="PdfViewport"
+                              Padding="10"
+                              Style="{StaticResource ThinScrollViewerStyle}"
+                              SizeChanged="OnPdfViewportChanged"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Auto">
+                    <Border Background="White"
+                            BorderBrush="{DynamicResource StrokeBrush}"
+                            BorderThickness="1"
+                            CornerRadius="2"
+                            HorizontalAlignment="Left">
+                        <!-- 宽度是视图模型算好的 DIP（= 显示宽度 × 缩放），位图像素 = 这个宽度 × 系统缩放，
+                             两者对齐才真正做到 1:1 落像素。不显式给宽的话，横向可滚的容器会让 Uniform 按原始像素排。 -->
+                        <Image Width="{Binding PdfDisplayWidth}"
+                               RenderOptions.BitmapScalingMode="Fant"
+                               SnapsToDevicePixels="True"
+                               Stretch="Uniform"
+                               Source="{Binding PdfPage}" />
+                    </Border>
+                </ScrollViewer>
+            </Border>
+
+            <ScrollViewer Style="{StaticResource ThinScrollViewerStyle}"
+                          VerticalScrollBarVisibility="Auto"
+                          Visibility="{Binding ShowArchive, Converter={StaticResource BoolToVis}}">
+                <!-- 绑 Rows 而不是 Entries：Entries 是 Core 的原始记录，字节数没换成「12.3 KB」这种写法，
+                     绑错的话名字照样列得出来、右边那一列却是空的（自检截图里就是这么发现的）。 -->
+                <ItemsControl ItemTemplate="{StaticResource ArchiveEntryTemplate}" ItemsSource="{Binding Rows}" />
+            </ScrollViewer>
+        </Grid>
+
+        <!-- 底部一条：截断说明 / PDF 翻页条。放在这里而不是塞进标题，是因为这两句都长。 -->
+        <Grid Grid.Row="3" Margin="0,8,0,0">
+            <TextBlock FontSize="11"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextSecondaryBrush}"
+                       Visibility="{Binding ShowsTruncationNote, Converter={StaticResource BoolToVis}}">
+                <Run Text="{Binding EncodingName, Mode=OneWay}" /><Run Text="　·　只读了开头一段，双击看全部" />
+            </TextBlock>
+
+            <StackPanel Orientation="Horizontal"
+                        HorizontalAlignment="Center"
+                        Visibility="{Binding HasPageNav, Converter={StaticResource BoolToVis}}">
+                <Button Content="&#xE76B;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="上一页"
+                        Command="{Binding PreviousPageCommand}"
+                        IsEnabled="{Binding CanGoPreviousPage}" />
+                <TextBlock Margin="8,0"
+                           VerticalAlignment="Center"
+                           FontSize="11.5"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           Text="{Binding PageLabel}" />
+                <Button Content="&#xE76C;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="下一页"
+                        Command="{Binding NextPageCommand}"
+                        IsEnabled="{Binding CanGoNextPage}" />
+
+                <!-- 窄栏里一页 A4 压到 386 DIP，字就是会小到读不动 —— 这不是渲染质量问题，是物理尺寸。
+                     所以给一排缩放：100% = 适配栏宽，放大之后横向滚动看细节（放大是按更高像素重渲，不是拉 bitmap）。 -->
+                <Border Width="1"
+                        Margin="10,3"
+                        Background="{DynamicResource DividerBrush}" />
+                <Button Content="&#xE71F;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="缩小"
+                        Command="{Binding ZoomOutCommand}" />
+                <Button MinWidth="44"
+                        Padding="6,3"
+                        Style="{StaticResource GhostButtonStyle}"
+                        FontSize="11.5"
+                        ToolTip="点一下回到适配栏宽"
+                        Content="{Binding PdfZoomLabel}"
+                        Command="{Binding ZoomFitCommand}" />
+                <Button Content="&#xE8A3;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="放大（重渲这一页，不是拉伸位图）"
+                        Command="{Binding ZoomInCommand}" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

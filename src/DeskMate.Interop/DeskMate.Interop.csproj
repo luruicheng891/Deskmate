@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Win32 互操作层。net8.0-windows：P/Invoke 声明、COM 接口、HwndSource 钩子都依赖 Windows TFM。
+    不引用 System.Drawing.Common —— HICON 以 IntPtr 返回，转 BitmapSource 由上层（Core）用
+    System.Windows.Interop.Imaging 完成，避免多余依赖。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>DeskMate.Interop</RootNamespace>
+  </PropertyGroup>
+
+</Project>

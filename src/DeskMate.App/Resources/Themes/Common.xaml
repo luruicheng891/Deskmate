@@ -1,0 +1,560 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:conv="clr-namespace:DeskMate.App.Converters">
+
+    <!-- 与主题无关的通用样式；颜色一律走 DynamicResource，切主题时立即生效。 -->
+
+    <conv:BoolToVisibilityConverter x:Key="BoolToVis" />
+    <conv:NullToVisibilityConverter x:Key="NullToVis" />
+    <conv:HexToBrushConverter x:Key="HexToBrush" />
+    <conv:FileCountConverter x:Key="FileCount" />
+    <conv:PathToLeafConverter x:Key="PathToLeaf" />
+    <conv:FirstLetterConverter x:Key="FirstLetter" />
+    <conv:DirectoryGlyphConverter x:Key="DirectoryGlyph" />
+    <conv:EqualityConverter x:Key="Equals" />
+    <conv:MarkdownInlineConverter x:Key="MdInline" />
+
+    <FontFamily x:Key="UiFontFamily">Microsoft YaHei UI, Segoe UI</FontFamily>
+
+    <!-- ============ 文本 ============ -->
+
+    <Style x:Key="TitleTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="20" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="SectionTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="BodyTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="CaptionTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+    </Style>
+
+    <!-- ============ 按钮 ============ -->
+
+    <Style x:Key="PrimaryButtonStyle" TargetType="Button">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource TextOnAccentBrush}" />
+        <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+        <Setter Property="Padding" Value="16,8" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Shell"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="8"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource AccentHoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Shell" Property="Opacity" Value="0.45" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="GhostButtonStyle" TargetType="Button" BasedOn="{StaticResource PrimaryButtonStyle}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Shell"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{DynamicResource StrokeBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Shell" Property="Opacity" Value="0.45" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 图标按钮：Dock 之外的窗口右上角关闭/设置等。 -->
+    <Style x:Key="IconButtonStyle" TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Width" Value="32" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Shell" Background="{TemplateBinding Background}" CornerRadius="6">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ 输入框 ============ -->
+
+    <Style x:Key="SearchBoxStyle" TargetType="TextBox">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="CaretBrush" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <Border Background="{TemplateBinding Background}">
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="FieldTextBoxStyle" TargetType="TextBox">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Padding" Value="10,7" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="CaretBrush" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <Border x:Name="Shell"
+                            Background="{DynamicResource SurfaceBrush}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="7">
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ComboStyle" TargetType="ComboBox">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Padding" Value="10,6" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+    </Style>
+
+    <Style x:Key="CheckStyle" TargetType="CheckBox">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <!-- ============ 卡片 / 面板 ============ -->
+
+    <Style x:Key="CardStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="12" />
+        <Setter Property="Padding" Value="14" />
+    </Style>
+
+    <Style x:Key="DividerLineStyle" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource DividerBrush}" />
+        <Setter Property="Height" Value="1" />
+    </Style>
+
+    <!-- 分组 Tab：用 RadioButton 的互斥语义，样式做成胶囊。 -->
+    <Style x:Key="TabPillStyle" TargetType="RadioButton">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+        <Setter Property="Padding" Value="14,7" />
+        <Setter Property="Margin" Value="0,0,8,0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Shell"
+                            Background="Transparent"
+                            BorderBrush="{DynamicResource StrokeBrush}"
+                            BorderThickness="1"
+                            CornerRadius="16"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource AccentBrush}" />
+                            <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            <Setter Property="Foreground" Value="{DynamicResource TextOnAccentBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 左侧导航项 -->
+    <Style x:Key="NavItemStyle" TargetType="RadioButton">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Shell" Background="Transparent" CornerRadius="8" Padding="{TemplateBinding Padding}" Margin="0,2">
+                        <ContentPresenter VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+                            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+                            <Setter Property="FontWeight" Value="SemiBold" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 颜色标签选择器：纯色圆点，选中加描边 -->
+    <Style x:Key="ColorSwatchStyle" TargetType="RadioButton">
+        <Setter Property="Width" Value="22" />
+        <Setter Property="Height" Value="22" />
+        <Setter Property="Margin" Value="0,0,8,0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Grid>
+                        <Ellipse x:Name="Ring" Width="22" Height="22" StrokeThickness="2" Stroke="Transparent" />
+                        <Ellipse Width="16" Height="16" Fill="{TemplateBinding Background}" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource AccentBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource TextSecondaryBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ 细滚动条 ============ -->
+
+    <Style x:Key="ThinScrollBarStyle" TargetType="ScrollBar">
+        <Setter Property="Width" Value="10" />
+        <Setter Property="MinWidth" Value="10" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollBar">
+                    <Grid Background="{TemplateBinding Background}">
+                        <Track x:Name="PART_Track" IsDirectionReversed="True">
+                            <Track.Thumb>
+                                <Thumb>
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border Background="{DynamicResource StrokeBrush}" CornerRadius="5" Margin="3,0" />
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False" />
+                            </Track.IncreaseRepeatButton>
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False" />
+                            </Track.DecreaseRepeatButton>
+                        </Track>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <Trigger Property="Orientation" Value="Horizontal">
+                <Setter Property="Height" Value="10" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ScrollBar">
+                            <Grid Background="Transparent">
+                                <Track x:Name="PART_Track">
+                                    <Track.Thumb>
+                                        <Thumb>
+                                            <Thumb.Template>
+                                                <ControlTemplate TargetType="Thumb">
+                                                    <Border Background="{DynamicResource StrokeBrush}" CornerRadius="5" Margin="0,3" />
+                                                </ControlTemplate>
+                                            </Thumb.Template>
+                                        </Thumb>
+                                    </Track.Thumb>
+                                    <Track.IncreaseRepeatButton>
+                                        <RepeatButton Command="ScrollBar.PageRightCommand" Opacity="0" Focusable="False" />
+                                    </Track.IncreaseRepeatButton>
+                                    <Track.DecreaseRepeatButton>
+                                        <RepeatButton Command="ScrollBar.PageLeftCommand" Opacity="0" Focusable="False" />
+                                    </Track.DecreaseRepeatButton>
+                                </Track>
+                            </Grid>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="ThinScrollViewerStyle" TargetType="ScrollViewer">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollViewer">
+                    <Grid>
+                        <ScrollContentPresenter x:Name="PART_ScrollContentPresenter"
+                                                CanContentScroll="{TemplateBinding CanContentScroll}"
+                                                Margin="0,0,2,0" />
+                        <ScrollBar x:Name="PART_VerticalScrollBar"
+                                   Style="{StaticResource ThinScrollBarStyle}"
+                                   Orientation="Vertical"
+                                   HorizontalAlignment="Right"
+                                   Value="{TemplateBinding VerticalOffset}"
+                                   Maximum="{TemplateBinding ScrollableHeight}"
+                                   ViewportSize="{TemplateBinding ViewportHeight}"
+                                   Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}" />
+                        <ScrollBar x:Name="PART_HorizontalScrollBar"
+                                   Style="{StaticResource ThinScrollBarStyle}"
+                                   Orientation="Horizontal"
+                                   VerticalAlignment="Bottom"
+                                   Value="{TemplateBinding HorizontalOffset}"
+                                   Maximum="{TemplateBinding ScrollableWidth}"
+                                   ViewportSize="{TemplateBinding ViewportWidth}"
+                                   Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}" />
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ 右键菜单 ============
+         隐式样式（不带 x:Key）：全应用 6 处 ContextMenu 一起跟着深浅色。
+         默认那套是白底直角 + 系统蓝高亮，压在深色毛玻璃面板上像别人家的窗口。 -->
+
+    <!-- 分隔线。全应用的 <Separator> 只出现在右键菜单里（9 处），所以做成隐式样式是安全的；
+         本来想把它塞进 ContextMenu.Resources 里只作用于菜单，但 Style 的 Setter 不能设 Resources
+         （XamlParseException：Value cannot be null. Parameter 'property'）。 -->
+    <Style TargetType="Separator">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Separator">
+                    <Border Height="1"
+                            Margin="9,5"
+                            Background="{DynamicResource DividerBrush}" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="ContextMenu">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="MinWidth" Value="176" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+
+        <Setter Property="ItemsPanel">
+            <Setter.Value>
+                <!-- SharedSizeScope 是让每条菜单的图标列 / 快捷键列对齐的关键 -->
+                <ItemsPanelTemplate>
+                    <StackPanel Grid.IsSharedSizeScope="True" />
+                </ItemsPanelTemplate>
+            </Setter.Value>
+        </Setter>
+
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Border Background="{DynamicResource SurfaceBrush}"
+                            BorderBrush="{DynamicResource StrokeBrush}"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Padding="4"
+                            SnapsToDevicePixels="True">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="18" ShadowDepth="4" Opacity="0.35" Direction="270" />
+                        </Border.Effect>
+                        <ScrollViewer Focusable="False"
+                                      VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <ItemsPresenter SnapsToDevicePixels="True" />
+                        </ScrollViewer>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="MenuItem">
+        <Setter Property="FontFamily" Value="{StaticResource UiFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        <Setter Property="Height" Value="30" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Border x:Name="Shell"
+                            Background="Transparent"
+                            CornerRadius="7"
+                            Padding="{TemplateBinding Padding}"
+                            SnapsToDevicePixels="True">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" SharedSizeGroup="MenuIcon" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" SharedSizeGroup="MenuGesture" />
+                                <ColumnDefinition Width="16" />
+                            </Grid.ColumnDefinitions>
+
+                            <ContentPresenter x:Name="Icon"
+                                              Grid.Column="0"
+                                              Width="20"
+                                              Margin="0,0,8,0"
+                                              VerticalAlignment="Center"
+                                              ContentSource="Icon"
+                                              SnapsToDevicePixels="True" />
+
+                            <ContentPresenter x:Name="Header"
+                                              Grid.Column="1"
+                                              VerticalAlignment="Center"
+                                              ContentSource="Header"
+                                              RecognizesAccessKey="True" />
+
+                            <TextBlock x:Name="Gesture"
+                                       Grid.Column="2"
+                                       Margin="18,0,0,0"
+                                       VerticalAlignment="Center"
+                                       FontSize="11"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                       Text="{TemplateBinding InputGestureText}" />
+
+                            <TextBlock x:Name="Arrow"
+                                       Grid.Column="3"
+                                       HorizontalAlignment="Right"
+                                       VerticalAlignment="Center"
+                                       FontFamily="Segoe MDL2 Assets"
+                                       FontSize="10"
+                                       Text="&#xE76C;"
+                                       Visibility="Collapsed"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+
+                            <!-- 子菜单（颜色标签、换分组）自己一层：外观要和父菜单一致 -->
+                            <Popup x:Name="PART_Popup"
+                                   Grid.Column="1"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   Placement="Right"
+                                   HorizontalOffset="6"
+                                   VerticalOffset="-6"
+                                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                   PopupAnimation="None">
+                                <Border Background="{DynamicResource SurfaceBrush}"
+                                        BorderBrush="{DynamicResource StrokeBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="10"
+                                        Padding="4"
+                                        MinWidth="150">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="18" ShadowDepth="4" Opacity="0.35" Direction="270" />
+                                    </Border.Effect>
+                                    <ScrollViewer Focusable="False"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  MaxHeight="420">
+                                        <Grid IsSharedSizeScope="True">
+                                            <ItemsPresenter SnapsToDevicePixels="True" />
+                                        </Grid>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Icon" Value="{x:Null}">
+                            <Setter TargetName="Icon" Property="Visibility" Value="Collapsed" />
+                        </Trigger>
+
+                        <Trigger Property="Role" Value="SubmenuHeader">
+                            <Setter TargetName="Arrow" Property="Visibility" Value="Visible" />
+                        </Trigger>
+
+                        <Trigger Property="IsSubmenuOpen" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SelectionBrush}" />
+                        </Trigger>
+
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                        </Trigger>
+
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                            <Setter Property="Opacity" Value="0.55" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+</ResourceDictionary>

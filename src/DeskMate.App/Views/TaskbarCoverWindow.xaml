@@ -1,0 +1,21 @@
+<Window x:Class="DeskMate.App.Views.TaskbarCoverWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DeskMate 任务栏遮罩"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        ResizeMode="NoResize"
+        Focusable="False"
+        UseLayoutRounding="True">
+
+    <!--
+      矩形，不要圆角也不要投影：这里的目标是「看起来就是桌面」，
+      圆角会把这条壁纸的边角切掉，露出底下真正的任务栏图标；投影会在壁纸上留一圈光晕，
+      两者都会让人一眼看出「这里贴了一块东西」。
+    -->
+    <Border x:Name="Backdrop" />
+</Window>

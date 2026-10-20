@@ -1,0 +1,952 @@
+<Window x:Class="DeskMate.App.Views.FolderManagerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:DeskMate.App.Controls"
+        xmlns:vm="clr-namespace:DeskMate.App.ViewModels"
+        Title="DeskMate 文件夹管理"
+        Width="1240"
+        Height="780"
+        MinWidth="760"
+        MinHeight="480"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource WindowBackgroundBrush}"
+        ShowInTaskbar="True"
+        AllowDrop="True"
+        Drop="OnWindowDrop"
+        DragOver="OnWindowDragOver"
+        UseLayoutRounding="True">
+
+    <Window.Resources>
+
+        <!-- 两种卡片按条目类型自动选模板：文件夹卡片与桌面文件卡片会同时出现在搜索结果里，
+             显式 ItemTemplate 只能给一个 ItemsControl 用，隐式模板才能两边共用。 -->
+        <DataTemplate DataType="{x:Type vm:FolderCardViewModel}">
+            <controls:FolderCard />
+        </DataTemplate>
+
+        <DataTemplate DataType="{x:Type vm:DesktopFileItemViewModel}">
+            <Border Width="{Binding DataContext.CardItemWidth, RelativeSource={RelativeSource AncestorType=Window}}"
+                    MinHeight="98"
+                    Margin="0,0,12,12"
+                    Padding="14,12,10,4"
+                    CornerRadius="12"
+                    Cursor="Hand"
+                    Background="{DynamicResource SurfaceBrush}"
+                    BorderBrush="{DynamicResource StrokeBrush}"
+                    BorderThickness="1"
+                    ToolTip="{Binding Location}">
+                <Border.ContextMenu>
+                    <ContextMenu MinWidth="200">
+                        <MenuItem Header="用关联程序打开" Command="{Binding OpenCommand}" />
+                        <MenuItem Header="在资源管理器中显示" Command="{Binding RevealCommand}" />
+                        <Separator />
+                        <MenuItem Header="加入收藏"
+                                  Visibility="{Binding IsFavorite, Converter={StaticResource BoolToVis}, ConverterParameter=invert}"
+                                  Command="{Binding ToggleFavoriteCommand}" />
+                        <MenuItem Header="从收藏移出"
+                                  Visibility="{Binding IsFavorite, Converter={StaticResource BoolToVis}}"
+                                  Command="{Binding ToggleFavoriteCommand}" />
+                    </ContextMenu>
+                </Border.ContextMenu>
+
+                <!-- 星星单独占一行而不是浮在右下角：这类卡片只有两行字，浮上去会盖住大小/时间 -->
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0"
+                                Width="38"
+                                Height="38"
+                                Margin="0,0,12,0"
+                                VerticalAlignment="Center"
+                                CornerRadius="9"
+                                Background="{DynamicResource SurfaceHoverBrush}">
+                            <TextBlock Text="{Binding Badge}"
+                                       FontSize="10"
+                                       FontWeight="SemiBold"
+                                       TextAlignment="Center"
+                                       TextWrapping="Wrap"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                        </Border>
+
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Name}"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxHeight="36"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Margin="0,5,0,0"
+                                       FontSize="11"
+                                       Foreground="{DynamicResource TextSecondaryBrush}">
+                                <!-- Run.Text 默认是 TwoWay 绑定，绑到只读属性上会在生成容器时抛 XamlParseException，必须显式 OneWay -->
+                                <Run Text="{Binding SizeText, Mode=OneWay}" /><Run Text="　·　" /><Run Text="{Binding ModifiedText, Mode=OneWay}" />
+                            </TextBlock>
+                        </StackPanel>
+                    </Grid>
+
+                    <Button Grid.Row="1"
+                            Content="{Binding StarGlyph}"
+                            HorizontalAlignment="Right"
+                            ToolTip="{Binding StarTip}"
+                            Command="{Binding ToggleFavoriteCommand}">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource IconButtonStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </Grid>
+            </Border>
+        </DataTemplate>
+        <!-- 面包屑那一段：看着像网页链接而不是按钮，但点下去是真的换一层。 -->
+        <Style x:Key="CrumbButtonStyle" TargetType="Button">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Padding" Value="3,1" />
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Shell"
+                                Padding="{TemplateBinding Padding}"
+                                CornerRadius="4"
+                                Background="{TemplateBinding Background}">
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid x:Name="Panel" Margin="20,16,20,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 第二列留给预览栏：它展开时只有卡片区（第一列）变窄，工具栏和标签行横跨两列不受影响 -->
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <!-- 工具栏 -->
+        <Grid Grid.Row="0" Grid.ColumnSpan="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Content="添加文件夹"
+                        Style="{StaticResource PrimaryButtonStyle}"
+                        Command="{Binding RequestPickFolderCommand}" />
+                <Button Content="刷新"
+                        Style="{StaticResource GhostButtonStyle}"
+                        Margin="10,0,0,0"
+                        Click="OnRefreshClick" />
+                <Button Content="＋ 新建"
+                        Style="{StaticResource GhostButtonStyle}"
+                        Margin="10,0,0,0"
+                        ToolTip="在桌面新建文件夹或文件（浮层里可以换到别的目录）。名字不带后缀=文件夹，带后缀（如 .c）=文件"
+                        Command="{Binding BeginCreateOnDesktopCommand}" />
+                <Button Content="＋ 收藏文件或压缩包"
+                        Style="{StaticResource GhostButtonStyle}"
+                        Margin="10,0,0,0"
+                        ToolTip="挑一个文件收进「★ 收藏」，只记路径，不复制、不移动原文件"
+                        Visibility="{Binding IsFavoritesView, Converter={StaticResource BoolToVis}}"
+                        Command="{Binding RequestPickFileCommand}" />
+
+                <!-- 不常用的三个收进「更多」：它们挤在工具栏上会把搜索框压成几十像素，根本点不中 -->
+                <Button x:Name="MoreButton"
+                        Content="更多"
+                        Style="{StaticResource GhostButtonStyle}"
+                        Margin="10,0,0,0"
+                        Click="OnMoreClick">
+                    <Button.ContextMenu>
+                        <ContextMenu MinWidth="200">
+                            <MenuItem Header="扫描桌面文件夹"
+                                      ToolTip="把桌面上还没纳入管理的文件夹补进来；只添加路径引用，桌面上的东西一个都不动"
+                                      Command="{Binding ScanDesktopCommand}" />
+                            <MenuItem Header="重命名当前分组" Command="{Binding BeginRenameGroupCommand}" />
+                            <MenuItem Header="删除当前分组"
+                                      ToolTip="只删 DeskMate 里的归类，组内文件夹会退到「未分组」，磁盘上一个文件都不动"
+                                      Command="{Binding RequestDeleteGroupCommand}" />
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+            </StackPanel>
+
+            <!-- 唯一的搜索框：放大镜图标放在框内左侧。横向撑满剩余空间，并留一个够点的最小宽度 -->
+            <Border Grid.Column="1"
+                    MinWidth="240"
+                    MaxWidth="420"
+                    Margin="16,0"
+                    HorizontalAlignment="Stretch"
+                    Background="{DynamicResource SurfaceBrush}"
+                    BorderBrush="{DynamicResource StrokeBrush}"
+                    BorderThickness="1"
+                    CornerRadius="9"
+                    Padding="12,7">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Style.Triggers>
+                            <!-- 窗口很窄时优先保证按钮，搜索框靠滚动区自己会换行；这里只是别让它缩没 -->
+                            <DataTrigger Binding="{Binding IsFavoritesView}" Value="True">
+                                <Setter Property="MinWidth" Value="180" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Left"
+                               Text="&#xE721;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="14"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               VerticalAlignment="Center"
+                               Margin="0,0,10,0" />
+                    <TextBox x:Name="SearchBox"
+                             MinHeight="22"
+                             Style="{StaticResource SearchBoxStyle}"
+                             FontSize="13"
+                             Text="{Binding Keyword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                </DockPanel>
+            </Border>
+
+            <Button Grid.Column="2"
+                    Content="新建分组"
+                    Style="{StaticResource GhostButtonStyle}"
+                    VerticalAlignment="Center"
+                    Command="{Binding BeginCreateGroupCommand}" />
+        </Grid>
+
+        <!-- 分组 Tab -->
+        <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,14,0,4">
+            <ItemsControl ItemsSource="{Binding Tabs}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <RadioButton Style="{StaticResource TabPillStyle}"
+                                     Content="{Binding Name}"
+                                     IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                     Command="{Binding DataContext.SelectTabCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                     CommandParameter="{Binding}">
+                            <!-- 分组的名字打错了只能删了重建、再把每个文件夹逐个换回去，所以 Tab 上直接给改名与删除。
+                                 命令挂在 Tab 自己身上：右键菜单的 DataContext 就是这张 Tab，绑祖先取不到命令。 -->
+                            <RadioButton.ContextMenu>
+                                <ContextMenu MinWidth="170">
+                                    <MenuItem Header="重命名这个分组" Command="{Binding RenameCommand}" />
+                                    <MenuItem Header="删除这个分组" Command="{Binding RequestDeleteCommand}" />
+                                </ContextMenu>
+                            </RadioButton.ContextMenu>
+                        </RadioButton>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock Text="{Binding StatusText}"
+                       VerticalAlignment="Center"
+                       Margin="14,0,0,0"
+                       Style="{StaticResource CaptionTextStyle}" />
+            <TextBlock Text="{Binding ViewHint}"
+                       VerticalAlignment="Center"
+                       Margin="14,0,0,0"
+                       Style="{StaticResource CaptionTextStyle}" />
+        </StackPanel>
+
+        <!-- 卡片网格那一层（全部 / 分组 / 桌面分类 / 收藏 / 搜索）。进入某个文件夹时整块收起，
+             由下面的浏览列表接管主区 —— 两边不同时出现，省得看混。 -->
+        <Grid x:Name="GridHost" Grid.Row="2" Grid.Column="0"
+              Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}, ConverterParameter=invert}">
+
+        <!-- 文件夹引用视图：卡片列表，可直接把文件夹拖进来 -->
+        <ScrollViewer Grid.Row="2"
+                      Margin="0,10,0,0"
+                      VerticalScrollBarVisibility="Auto"
+                      Style="{StaticResource ThinScrollViewerStyle}"
+                      x:Name="CardsScroll"
+                      Visibility="{Binding IsFolderView, Converter={StaticResource BoolToVis}}">
+            <ItemsControl x:Name="CardsHost"
+                          SizeChanged="OnCardAreaSizeChanged"
+                          ItemsSource="{Binding Cards}"
+                          AllowDrop="True"
+                          PreviewMouseLeftButtonUp="OnCardClick"
+                          MouseLeftButtonDown="OnCardDoubleClick"
+                          PreviewMouseLeftButtonDown="OnCardPreviewMouseDown"
+                          MouseMove="OnCardMouseMove">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <!-- 桌面文件归类视图：虚拟分类，按扩展名映射，不移动桌面上任何文件 -->
+        <ScrollViewer Grid.Row="2"
+                      Margin="0,10,0,0"
+                      VerticalScrollBarVisibility="Auto"
+                      Style="{StaticResource ThinScrollViewerStyle}"
+                      Visibility="{Binding IsDesktopView, Converter={StaticResource BoolToVis}}">
+            <ItemsControl x:Name="DesktopHost"
+                          ItemsSource="{Binding DesktopFiles}"
+                          SizeChanged="OnCardAreaSizeChanged"
+                          PreviewMouseLeftButtonDown="OnDesktopFilePreviewMouseDown"
+                          MouseMove="OnDesktopFileMouseMove"
+                          MouseLeftButtonUp="OnDesktopFileClick"
+                          MouseDoubleClick="OnDesktopFileDoubleClick">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <!-- 搜索视图：受管文件夹与桌面文件混在一页，卡片模板按条目类型自动选 -->
+        <ScrollViewer Grid.Row="2"
+                      Margin="0,10,0,0"
+                      VerticalScrollBarVisibility="Auto"
+                      Style="{StaticResource ThinScrollViewerStyle}"
+                      Visibility="{Binding IsSearchView, Converter={StaticResource BoolToVis}}">
+            <ItemsControl ItemsSource="{Binding SearchHits}"
+                          SizeChanged="OnCardAreaSizeChanged"
+                          PreviewMouseLeftButtonUp="OnCardClick"
+                          MouseDoubleClick="OnSearchHostDoubleClick">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <!-- 收藏视图：目录、文件、压缩包混在一页。单击在右侧预览栏看内容，双击才真的打开。只记路径引用。 -->
+        <ScrollViewer Grid.Row="2"
+                      Margin="0,10,0,0"
+                      VerticalScrollBarVisibility="Auto"
+                      Style="{StaticResource ThinScrollViewerStyle}"
+                      Visibility="{Binding IsFavoritesView, Converter={StaticResource BoolToVis}}">
+            <ItemsControl x:Name="FavoritesHost"
+                          ItemsSource="{Binding FavoriteCards}"
+                          SizeChanged="OnCardAreaSizeChanged"
+                          MouseLeftButtonUp="OnFavoriteCardClick"
+                          MouseDoubleClick="OnFavoriteCardDoubleClick">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Width="{Binding DataContext.CardItemWidth, RelativeSource={RelativeSource AncestorType=Window}}"
+                                MinHeight="98"
+                                Margin="0,0,12,12"
+                                Padding="14,12,14,20"
+                                CornerRadius="12"
+                                Cursor="Hand"
+                                Background="{DynamicResource SurfaceBrush}"
+                                BorderBrush="{DynamicResource StrokeBrush}"
+                                BorderThickness="1"
+                                ToolTip="{Binding FullPath}">
+                            <Border.ContextMenu>
+                                <ContextMenu MinWidth="184">
+                                    <MenuItem Header="在预览栏看内容"
+                                              ToolTip="目录列它里面的东西，文件列它所在的目录"
+                                              Command="{Binding PreviewCommand}" />
+                                    <MenuItem Header="打开" Command="{Binding OpenCommand}" />
+                                    <MenuItem Header="打开文件位置" Command="{Binding RevealCommand}" />
+                                    <Separator />
+                                    <MenuItem Header="从收藏移出" Command="{Binding UnfavoriteCommand}" />
+                                </ContextMenu>
+                            </Border.ContextMenu>
+
+                            <Grid>
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="38"
+                                            Height="38"
+                                            Margin="0,0,12,0"
+                                            VerticalAlignment="Center"
+                                            CornerRadius="9"
+                                            Background="{DynamicResource SurfaceHoverBrush}">
+                                        <Grid>
+                                            <!-- 目录用文件夹字形，文件用扩展名角标（ZIP / C / DOCX） -->
+                                            <TextBlock Text="&#xE8B7;"
+                                                       FontFamily="Segoe MDL2 Assets"
+                                                       FontSize="22"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                                       Visibility="{Binding IsDirectory, Converter={StaticResource BoolToVis}}" />
+                                            <TextBlock Text="{Binding Badge}"
+                                                       FontSize="10"
+                                                       FontWeight="SemiBold"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                                       Visibility="{Binding IsDirectory, Converter={StaticResource BoolToVis}, ConverterParameter=invert}" />
+                                        </Grid>
+                                    </Border>
+
+                                    <StackPanel VerticalAlignment="Center" MaxWidth="176">
+                                        <TextBlock Text="{Binding Title}"
+                                                   FontSize="14"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   MaxHeight="38"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding Location}"
+                                                   FontSize="11"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Margin="0,3,0,0" />
+                                        <TextBlock Text="{Binding MetaText}"
+                                                   FontSize="11"
+                                                   Margin="0,5,0,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsValid}" Value="False">
+                                                            <Setter Property="Foreground" Value="{DynamicResource InvalidBrush}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <Button Content="{Binding StarGlyph}"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Bottom"
+                                        Style="{StaticResource IconButtonStyle}"
+                                        Foreground="{DynamicResource WarningBrush}"
+                                        ToolTip="已收藏 · 点一下移出收藏"
+                                        Command="{Binding UnfavoriteCommand}" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <!-- 空分类也要说句话，否则整块空白看着像面板坏了。放在滚动区外面，不吃鼠标。 -->
+        <TextBlock Grid.Row="2"
+                   Text="这一类暂时没有文件。桌面分类只收文件，文件夹与隐藏项不参与归类。"
+                   Visibility="{Binding IsDesktopEmpty, Converter={StaticResource BoolToVis}}"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Top"
+                   Margin="0,56,0,0"
+                   IsHitTestVisible="False"
+                   Style="{StaticResource CaptionTextStyle}" />
+
+        <TextBlock Grid.Row="2"
+                   Text="没搜到。这里找的是受管文件夹和桌面上的文件；要搜某个目录里面的文件，用 Alt+Space 的全局搜索，它会读受管目录的一层内容。"
+                   Visibility="{Binding IsSearchEmpty, Converter={StaticResource BoolToVis}}"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Top"
+                   Margin="0,56,0,0"
+                   TextWrapping="Wrap"
+                   TextAlignment="Center"
+                   MaxWidth="560"
+                   IsHitTestVisible="False"
+                   Style="{StaticResource CaptionTextStyle}" />
+
+        <TextBlock Grid.Row="2"
+                   Text="还没有收藏。文件夹卡片右下角的 ☆、桌面文件卡片和预览行末尾的 ☆，点一下就收进来；要收藏面板里看不到的文件，用上面的「＋ 收藏文件或压缩包」。"
+                   Visibility="{Binding IsFavoritesEmpty, Converter={StaticResource BoolToVis}}"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Top"
+                   Margin="0,56,0,0"
+                   TextWrapping="Wrap"
+                   TextAlignment="Center"
+                   MaxWidth="560"
+                   IsHitTestVisible="False"
+                   Style="{StaticResource CaptionTextStyle}" />
+        </Grid>
+
+        <!-- 浏览某个文件夹的内部：主区直接列这一层的东西（像资源管理器那样走进去），
+             右边那一栏同时是内容窗格。单击目录 = 走进它，单击文件 = 右边看内容，双击 = 交给系统打开。 -->
+        <Grid Grid.Row="2" Grid.Column="0" Margin="0,10,0,0"
+              Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Button Grid.Column="0"
+                        Content="&#xE76B;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="返回上一层（没有上一层就回到文件夹列表）"
+                        Command="{Binding GoBackPreviewCommand}" />
+
+                <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding BrowseTitle}"
+                               FontSize="14"
+                               FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource TextPrimaryBrush}" />
+
+                    <!-- 面包屑：每一段都能点，深四五层时不用按 ← 数着退回去。
+                         命令经祖先取（段的 DataContext 是 BreadcrumbItem 自己）。 -->
+                    <ScrollViewer Margin="0,2,0,0"
+                                  VerticalScrollBarVisibility="Disabled"
+                                  HorizontalScrollBarVisibility="Hidden">
+                        <ItemsControl ItemsSource="{Binding Breadcrumbs}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Content="{Binding Display}"
+                                                Style="{StaticResource CrumbButtonStyle}"
+                                                ToolTip="{Binding Path}"
+                                                Command="{Binding DataContext.BrowseToCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                CommandParameter="{Binding}" />
+                                        <TextBlock x:Name="Sep"
+                                                   Text="›"
+                                                   Margin="3,0,1,0"
+                                                   VerticalAlignment="Center"
+                                                   FontSize="11"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}" />
+                                    </StackPanel>
+                                    <DataTemplate.Triggers>
+                                        <DataTrigger Binding="{Binding IsLast}" Value="True">
+                                            <Setter TargetName="Sep" Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </DataTemplate.Triggers>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="&#xE710;"
+                            Style="{StaticResource IconButtonStyle}"
+                            ToolTip="在这一层新建：不带后缀=文件夹，带后缀（如 .c）=文件"
+                            Command="{Binding BeginCreateInPreviewCommand}" />
+                    <Button Content="&#xE838;"
+                            Style="{StaticResource IconButtonStyle}"
+                            ToolTip="在资源管理器里打开这一层"
+                            Command="{Binding OpenBrowseInExplorerCommand}" />
+                </StackPanel>
+            </Grid>
+
+            <!-- 表头与条目用同样的固定列宽，名字列吃掉剩余空间，这样标题不会跟内容错位 -->
+            <Grid Grid.Row="1" Margin="10,0,10,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="84" />
+                    <ColumnDefinition Width="86" />
+                    <ColumnDefinition Width="34" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="名称" Style="{StaticResource CaptionTextStyle}" />
+                <TextBlock Grid.Column="1" Text="大小" Style="{StaticResource CaptionTextStyle}" />
+                <TextBlock Grid.Column="2" Text="修改时间" Style="{StaticResource CaptionTextStyle}" />
+            </Grid>
+
+            <ListBox Grid.Row="2"
+                     x:Name="BrowseList"
+                     ItemsSource="{Binding PreviewItems}"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     HorizontalContentAlignment="Stretch"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     PreviewMouseLeftButtonDown="OnPreviewEntryPreviewMouseDown"
+                     MouseMove="OnPreviewEntryMouseMove"
+                     MouseLeftButtonUp="OnPreviewEntryClick"
+                     MouseDoubleClick="OnPreviewEntryDoubleClick">
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="Padding" Value="8,5" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <Border x:Name="Shell"
+                                            Padding="{TemplateBinding Padding}"
+                                            CornerRadius="7"
+                                            Background="Transparent">
+                                        <ContentPresenter />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                                        </Trigger>
+                                        <!-- 选中看条目自己的 IsSelected（右边正在看它 = 它亮），不是 ListBox 的选择 -->
+                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SelectionBrush}" />
+                                        </DataTrigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid>
+                            <!--
+                              行上的右键菜单：打开 / 显示 / 重命名 / 移到回收站。
+                              占位提示行（「仅显示前 50 项」那类）没有路径，整组菜单对它没有意义，所以按 HasPath 收起来。
+                            -->
+                            <Grid.ContextMenu>
+                                <ContextMenu MinWidth="196">
+                                    <MenuItem Header="打开"
+                                              Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                              Command="{Binding OpenCommand}" />
+                                    <MenuItem Header="在资源管理器中显示"
+                                              Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                              Command="{Binding RevealCommand}" />
+                                    <MenuItem Header="重命名…"
+                                              Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                              ToolTip="只改名字，不挪位置。同名或非法字符会被挡下来，什么都不改。"
+                                              Command="{Binding RenameCommand}" />
+                                    <MenuItem Header="移到回收站…"
+                                              Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                              ToolTip="进回收站，之后还能还原。整个面板里只有这里会动到磁盘。"
+                                              Command="{Binding RecycleCommand}" />
+                                </ContextMenu>
+                            </Grid.ContextMenu>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="84" />
+                                <ColumnDefinition Width="86" />
+                                <ColumnDefinition Width="34" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                <TextBlock Text="{Binding IsDirectory, Converter={StaticResource DirectoryGlyph}}"
+                                           FontFamily="Segoe MDL2 Assets"
+                                           FontSize="14"
+                                           Margin="0,0,8,0"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TextSecondaryBrush}" />
+                                <TextBlock Text="{Binding Name}"
+                                           FontSize="13"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           MaxWidth="560"
+                                           Foreground="{DynamicResource TextPrimaryBrush}" />
+                            </StackPanel>
+
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding SizeText}"
+                                       FontSize="11.5"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+
+                            <TextBlock Grid.Column="2"
+                                       Text="{Binding ModifiedText}"
+                                       FontSize="11.5"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+
+                            <!-- 每一行都能就地收藏；占位提示行（「仅显示前 50 项」）不是路径，按钮收起来 -->
+                            <Button Grid.Column="3"
+                                    Content="{Binding StarGlyph}"
+                                    HorizontalAlignment="Right"
+                                    Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                    ToolTip="{Binding StarTip}"
+                                    Command="{Binding ToggleFavoriteCommand}">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource IconButtonStyle}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                <Setter Property="Foreground" Value="{DynamicResource WarningBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
+
+        <!-- 内容窗格：只在选中文件时出现，主区那一列继续摆着这一层的列表 —— 两边同时可见。 -->
+        <Border x:Name="PreviewPanel"
+                Grid.Row="2"
+                Grid.Column="1"
+                Width="520"
+                Margin="16,10,0,0"
+                VerticalAlignment="Stretch"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource StrokeBrush}"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="16"
+                Visibility="{Binding IsFilePreviewOpen, Converter={StaticResource BoolToVis}}">
+            <!-- 开关绑在这个 Border 上（它的 DataContext 还是面板视图模型）。
+                 绑到 FilePreviewControl 自己身上，等于拿它自己的 DataContext（一份文件预览）
+                 去问「IsFilePreviewOpen」→ 属性不存在 → 绑定静默失败 → Visibility 停在默认值 Visible。 -->
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <DockPanel Grid.Row="0" Margin="0,0,0,10">
+                    <Button DockPanel.Dock="Right"
+                            Content="&#xE711;"
+                            Style="{StaticResource IconButtonStyle}"
+                            ToolTip="收起内容窗格（主区的列表不动）"
+                            Command="{Binding CloseContentCommand}" />
+                    <TextBlock Text="内容"
+                               Style="{StaticResource SectionTextStyle}"
+                               VerticalAlignment="Center" />
+                </DockPanel>
+
+                <controls:FilePreviewControl Grid.Row="1" DataContext="{Binding FilePreview}" />
+            </Grid>
+        </Border>
+
+        <!-- 重命名浮层：只改 DeskMate 里的显示名 -->
+        <Border x:Name="RenameOverlay"
+                Grid.Row="0"
+                Grid.RowSpan="3"
+                Grid.ColumnSpan="2"
+                Width="380"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource StrokeBrush}"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="20"
+                Visibility="{Binding IsRenameVisible, Converter={StaticResource BoolToVis}}">
+            <StackPanel>
+                <TextBlock Text="重命名显示名" Style="{StaticResource SectionTextStyle}" />
+                <TextBlock Text="只修改 DeskMate 卡片上显示的名字，磁盘上的文件夹名称不变。"
+                           Style="{StaticResource CaptionTextStyle}"
+                           Margin="0,6,0,12" />
+                <TextBox x:Name="RenameBox"
+                         Style="{StaticResource FieldTextBoxStyle}"
+                         Text="{Binding RenameText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         KeyDown="OnRenameKeyDown" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+                    <Button Content="取消"
+                            Style="{StaticResource GhostButtonStyle}"
+                            Command="{Binding CancelRenameCommand}" />
+                    <Button Content="保存"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            Margin="10,0,0,0"
+                            Command="{Binding CommitRenameCommand}" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- 新建分组浮层：边输入边校验，不合法时「确认」置灰 -->
+        <Border x:Name="NewGroupOverlay"
+                Grid.Row="0"
+                Grid.RowSpan="3"
+                Grid.ColumnSpan="2"
+                Width="380"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource StrokeBrush}"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="20"
+                Visibility="{Binding IsNewGroupVisible, Converter={StaticResource BoolToVis}}">
+            <StackPanel>
+                <TextBlock Text="新建分组" Style="{StaticResource SectionTextStyle}" />
+                <TextBlock Text="分组只是 DeskMate 里的归类方式，不会新建、移动或改名任何文件夹。"
+                           Style="{StaticResource CaptionTextStyle}"
+                           Margin="0,6,0,12" />
+                <TextBox x:Name="GroupNameBox"
+                         Style="{StaticResource FieldTextBoxStyle}"
+                         MaxLength="24"
+                         Text="{Binding NewGroupName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         KeyDown="OnGroupNameKeyDown" />
+                <!-- 固定高度：有提示时浮层不跳动 -->
+                <TextBlock Text="{Binding GroupNameError}"
+                           Foreground="{DynamicResource InvalidBrush}"
+                           FontSize="12"
+                           TextWrapping="Wrap"
+                           MinHeight="18"
+                           Margin="0,6,0,0" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="取消"
+                            Style="{StaticResource GhostButtonStyle}"
+                            Command="{Binding CancelCreateGroupCommand}" />
+                    <Button Content="确认"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            Margin="10,0,0,0"
+                            Command="{Binding CommitGroupCommand}" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- 重命名分组浮层：只改 Tab 上显示的名字，组里的文件夹与磁盘上的目录都不动 -->
+        <Border x:Name="RenameGroupOverlay"
+                Grid.Row="0"
+                Grid.RowSpan="3"
+                Grid.ColumnSpan="2"
+                Width="380"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource StrokeBrush}"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="20"
+                Visibility="{Binding IsRenameGroupVisible, Converter={StaticResource BoolToVis}}">
+            <StackPanel>
+                <TextBlock Text="重命名分组" Style="{StaticResource SectionTextStyle}" />
+                <TextBlock Text="只改 Tab 上显示的名字。组里的文件夹靠分组 Id 关联，改名不会把它们弄丢。"
+                           Style="{StaticResource CaptionTextStyle}"
+                           Margin="0,6,0,12" />
+                <TextBox x:Name="RenameGroupBox"
+                         Style="{StaticResource FieldTextBoxStyle}"
+                         MaxLength="24"
+                         Text="{Binding RenameGroupText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         KeyDown="OnRenameGroupKeyDown" />
+                <!-- 固定高度：有提示时浮层不跳动 -->
+                <TextBlock Text="{Binding RenameGroupError}"
+                           Foreground="{DynamicResource InvalidBrush}"
+                           FontSize="12"
+                           TextWrapping="Wrap"
+                           MinHeight="18"
+                           Margin="0,6,0,0" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="取消"
+                            Style="{StaticResource GhostButtonStyle}"
+                            Command="{Binding CancelRenameGroupCommand}" />
+                    <Button Content="保存"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            Margin="10,0,0,0"
+                            Command="{Binding CommitGroupRenameCommand}" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- 新建浮层：名字里有没有后缀决定建文件夹还是文件，所以把「将新建什么」实时写在下面 -->
+        <Border x:Name="CreateEntryOverlay"
+                Grid.Row="0"
+                Grid.RowSpan="3"
+                Grid.ColumnSpan="2"
+                Width="520"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource StrokeBrush}"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="20"
+                Visibility="{Binding IsCreateEntryVisible, Converter={StaticResource BoolToVis}}">
+            <StackPanel>
+                <TextBlock Text="新建文件夹 / 文件" Style="{StaticResource SectionTextStyle}" />
+                <TextBlock Text="选一个类型，再写名字。选 Word / Excel / PPT 会自动补上后缀，并且建出来的是能直接打开的文件（不是 0 字节的空壳）。「其他」那项自己带后缀，比如 main.c 就是 C 源文件。"
+                           Style="{StaticResource CaptionTextStyle}"
+                           TextWrapping="Wrap"
+                           Margin="0,6,0,12" />
+                <!-- 类型：一行胶囊，点哪个建哪个 -->
+                <ItemsControl ItemsSource="{Binding CreateEntryTypes}"
+                              Margin="0,0,0,12">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <RadioButton Style="{StaticResource TabPillStyle}"
+                                         GroupName="NewEntryType"
+                                         Content="{Binding Label}"
+                                         IsChecked="{Binding IsSelected, Mode=TwoWay}" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <!-- 建在哪：三个入口给的答案不一样（卡片 / 桌面 / 预览里正在看的那一层），所以必须显出来还能改 -->
+                <DockPanel Margin="0,0,0,8">
+                    <Button DockPanel.Dock="Right"
+                            Content="换个位置…"
+                            Style="{StaticResource GhostButtonStyle}"
+                            Command="{Binding RequestPickCreateLocationCommand}" />
+                    <TextBlock VerticalAlignment="Center"
+                               FontSize="12"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               TextTrimming="CharacterEllipsis">
+                        <Run Text="建在：" /><Run Text="{Binding CreateEntryDirectory, Mode=OneWay}" />
+                    </TextBlock>
+                </DockPanel>
+                <TextBox x:Name="CreateEntryBox"
+                         Style="{StaticResource FieldTextBoxStyle}"
+                         MaxLength="120"
+                         Text="{Binding CreateEntryText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         KeyDown="OnCreateEntryKeyDown" />
+                <!-- 固定高度：有提示时浮层不跳动 -->
+                <TextBlock Text="{Binding CreateEntryError}"
+                           Foreground="{DynamicResource InvalidBrush}"
+                           FontSize="12"
+                           TextWrapping="Wrap"
+                           MinHeight="18"
+                           Margin="0,6,0,0" />
+                <TextBlock Text="{Binding CreateEntryPreview}"
+                           FontSize="11"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           MinHeight="16"
+                           Margin="0,2,0,0" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                    <Button Content="取消"
+                            Style="{StaticResource GhostButtonStyle}"
+                            Command="{Binding CancelCreateEntryCommand}" />
+                    <Button Content="新建"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            Margin="10,0,0,0"
+                            Command="{Binding CommitCreateEntryCommand}" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

@@ -1,0 +1,13 @@
+<Application x:Class="DeskMate.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- 0 号位置固定留给主题色板，ThemeService 运行时替换它的 Source -->
+                <ResourceDictionary Source="/Resources/Themes/Light.xaml" />
+                <ResourceDictionary Source="/Resources/Themes/Common.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
