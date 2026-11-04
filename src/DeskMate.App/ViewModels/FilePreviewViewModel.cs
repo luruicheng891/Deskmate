@@ -549,7 +549,7 @@ public sealed partial class FilePreviewViewModel : ObservableObject
     private static async Task<byte[]> ReadAllBytesAsync(string path, CancellationToken token)
     {
         await using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 16 * 1024,
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 16 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
 
         var bytes = new byte[stream.Length];

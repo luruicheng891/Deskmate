@@ -163,21 +163,133 @@ public sealed class DockRunningSectionTests : IDisposable
             _config.Current.DockItems.OrderBy(item => item.Order).Select(item => item.TargetPath).ToArray());
     }
 
+    /// <summary>
+    /// 关掉一个应用：窗口没了的那一刻进程通常还在退。指示点不能干等下一轮补刷 ——
+    /// Dock 要主动要求「这些进程退了叫我」，退的那一刻就把灯合上。
+    /// </summary>
+    [Fact]
+    public async Task RunningWithoutWindow_IsWatchedForProcessExit()
+    {
+        _probe.ExtraNames.Add("notepad");
+
+        await _dock.LoadAsync();
+
+        var item = _dock.Items.Single(entry => entry.DisplayName == "记事本");
+        Assert.True(item.IsRunning);
+        Assert.True(item.IsHiddenInTray);
+        Assert.Contains("notepad", _probe.Watched);
+    }
+
+    /// <summary>名单没变就不该重挂：否则每 2 秒一次轮询都要重新开一批进程句柄。</summary>
+    [Fact]
+    public async Task SameSuspects_KeepTheOneExitWatchAlreadyAttached()
+    {
+        _probe.ExtraNames.Add("notepad");
+        await _dock.LoadAsync();
+
+        await _dock.RefreshRunningStateAsync();
+        await _dock.RefreshRunningStateAsync();
+
+        Assert.Equal(1, _probe.WatchTimes);
+    }
+
+    /// <summary>
+    /// 进程退了立刻改图标，不等任何一轮定时补刷 —— 这正是用户报的「关了应用，图标还亮着一秒多」。
+    /// </summary>
+    [Fact]
+    public async Task ProcessExit_DimsTheLightRightAway()
+    {
+        _probe.ExtraNames.Add("notepad");
+        await _dock.LoadAsync();
+
+        var item = _dock.Items.Single(entry => entry.DisplayName == "记事本");
+        Assert.True(item.IsRunning);
+        Assert.NotNull(_probe.ExitCallback); // 退出通知真的挂在了这个进程上
+
+        // 系统那边：进程没了，挂在那儿的回调就该响；它触发的正是 ProcessesExitedAsync 这一句。
+        _probe.ExtraNames.Clear();
+        await _dock.ProcessesExitedAsync();
+
+        Assert.False(item.IsRunning);
+        Assert.False(item.IsHiddenInTray);
+        Assert.Empty(_probe.Watched);
+        Assert.Equal(1, _probe.ReleasedTimes);
+    }
+
+    /// <summary>停止跟踪（隐藏 Dock、开始拖拽）时不能把别人的进程句柄攥在手里不放。</summary>
+    [Fact]
+    public async Task StoppedTracking_ReleasesTheExitWatch()
+    {
+        _probe.ExtraNames.Add("notepad");
+        await _dock.LoadAsync();
+        _dock.StartRunningPolling();
+
+        Assert.Single(_probe.Watched);
+
+        _dock.StopRunningPolling();
+
+        Assert.Equal(1, _probe.ReleasedTimes);
+    }
+
     public void Dispose() => _temp.Dispose();
 
     private sealed class FakeProbe : IProcessProbeService
     {
+        /// <summary>当前开着窗口的应用（运行区与「有没有窗口」的判据都来自它）。</summary>
         public List<RunningApp> Apps { get; } = new();
+
+        /// <summary>
+        /// 除了「有窗口的应用」之外还有哪些进程活着：摆「进程在、窗口没了」这种状态用，
+        /// 也就是刚关掉正在退场的应用、以及缩回托盘的应用。
+        /// </summary>
+        public List<string> ExtraNames { get; } = new();
+
+        /// <summary>此刻还挂着的监视分别盯了哪些进程名（Dispose 掉的就从这份里消失）。</summary>
+        public List<string> Watched => _liveWatches.SelectMany(watch => watch.Names).ToList();
+
+        /// <summary>连同那份名单一起给回来的「进程退了就叫我」回调；测试靠它模拟进程真的退了。</summary>
+        public Action? ExitCallback { get; private set; }
+
+        /// <summary>挂过几遍监视：名单没变时不该重挂，否则内核句柄跟着轮询次数一起涨。</summary>
+        public int WatchTimes { get; private set; }
+
+        /// <summary>已经 Dispose 掉几份监视。</summary>
+        public int ReleasedTimes { get; private set; }
+
+        private readonly List<ExitWatch> _liveWatches = new();
 
         public Task<string> ResolveExecutablePathAsync(string path) => Task.FromResult(path);
 
         public Task<IReadOnlySet<string>> SnapshotRunningNamesAsync() => Task.FromResult<IReadOnlySet<string>>(
-            Apps.Select(app => Path.GetFileNameWithoutExtension(app.ExecutablePath).ToLowerInvariant()).ToHashSet(StringComparer.OrdinalIgnoreCase));
+            Apps.Select(app => Path.GetFileNameWithoutExtension(app.ExecutablePath))
+                .Concat(ExtraNames)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase));
 
         public bool IsRunning(string executablePath, IReadOnlySet<string> runningNames)
             => runningNames.Contains(Path.GetFileNameWithoutExtension(executablePath));
 
         public Task<IReadOnlyList<RunningApp>> SnapshotRunningAppsAsync() => Task.FromResult<IReadOnlyList<RunningApp>>(Apps.ToList());
+
+        public IDisposable WatchProcessExits(IEnumerable<string> processNames, Action onExit)
+        {
+            ExitCallback = onExit;
+            WatchTimes++;
+
+            var watch = new ExitWatch(this, processNames.ToList());
+            _liveWatches.Add(watch);
+            return watch;
+        }
+
+        private sealed class ExitWatch(FakeProbe owner, List<string> names) : IDisposable
+        {
+            public List<string> Names { get; } = names;
+
+            public void Dispose()
+            {
+                _ = owner._liveWatches.Remove(this);
+                owner.ReleasedTimes++;
+            }
+        }
     }
 
     private sealed class FakeIcons : IIconService
@@ -210,6 +322,9 @@ public sealed class DockRunningSectionTests : IDisposable
     private sealed class FakeWindows : IWindowService
     {
         public Task<IReadOnlyList<AppWindowInfo>> GetWindowsAsync(string executablePath)
+            => Task.FromResult<IReadOnlyList<AppWindowInfo>>([]);
+
+        public Task<IReadOnlyList<AppWindowInfo>> GetWindowsByProcessNameAsync(string processName)
             => Task.FromResult<IReadOnlyList<AppWindowInfo>>([]);
 
         public AppWindowInfo? PickClickTarget(IReadOnlyList<AppWindowInfo> windows, nint foregroundHandle) => null;

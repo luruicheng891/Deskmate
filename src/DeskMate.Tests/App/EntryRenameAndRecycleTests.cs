@@ -24,7 +24,7 @@ public class EntryRenameAndRecycleTests : IDisposable
     {
         var config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(config, NullLogger<FolderService>.Instance);
-        _viewModel = new FolderManagerViewModel(_folders, _launcher, _desktop, _files, NullLogger<FolderManagerViewModel>.Instance);
+        _viewModel = new FolderManagerViewModel(_folders, _launcher, _desktop, _files, config, NullLogger<FolderManagerViewModel>.Instance);
         _viewModel.UserNotice += (_, args) => _notices.Add(args.Message);
     }
 

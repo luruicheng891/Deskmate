@@ -236,42 +236,64 @@ public sealed class AppShell
     /// <summary>退出前收起所有窗口并解绑事件。</summary>
     public void Shutdown()
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var steps = new List<string>();
+        void Step(string name) => steps.Add($"{name} {watch.Elapsed.TotalMilliseconds:F0}ms");
+
         _fullscreen.FullscreenChanged -= OnFullscreenChanged;
         _config.ConfigChanged -= OnConfigChanged;
         _fullscreen.Dispose();
+        Step("全屏检测");
         _hotkeys.Unregister();
+        Step("快捷键");
 
-        if (_services.GetService<DockWindow>() is { } dock)
+        // 只收「已经建出来的」窗口。窗口都是容器里的懒单例，用 GetService 取没打开过的那几个
+        // （启动台、文件夹管理、设置、搜索）会在退出时现场构造一遍 —— 解析整份 XAML、套样式、
+        // 建视图模型，然后立刻关掉，白白拖慢退出。没建出来的窗口也就没有东西可关。
+        if (Existing<DockWindow>() is { } dock)
         {
             dock.CloseFromShell();
+            Step("Dock");
         }
 
-        if (_services.GetService<TaskbarCoverWindow>() is { } cover)
+        if (Existing<TaskbarCoverWindow>() is { } cover)
         {
             cover.CloseFromShell();
+            Step("遮罩");
         }
 
         // 平时点 X 只是隐藏，退出时必须真关，否则隐藏窗口还占着资源。
-        if (_services.GetService<FolderManagerWindow>() is { } folders)
+        if (Existing<FolderManagerWindow>() is { } folders)
         {
             folders.CloseFromShell();
+            Step("文件夹管理");
         }
 
-        if (_services.GetService<SettingsWindow>() is { } settings)
+        if (Existing<SettingsWindow>() is { } settings)
         {
             settings.CloseFromShell();
+            Step("设置");
         }
 
-        if (_services.GetService<LauncherWindow>() is { } launcher)
+        if (Existing<LauncherWindow>() is { } launcher)
         {
             launcher.Close();
+            Step("启动台");
         }
 
-        if (_services.GetService<SearchWindow>() is { } search)
+        if (Existing<SearchWindow>() is { } search)
         {
             search.Close();
+            Step("搜索");
         }
+
+        // 累计毫秒，相邻两项相减是该步耗时；没出现的窗口说明本次运行里根本没建过。
+        _logger.LogInformation("退出收尾 {Total:F0} ms（{Steps}）", watch.Elapsed.TotalMilliseconds, string.Join("，", steps));
     }
+
+    /// <summary>WPF 已经构造出来的某类窗口；没构造过返回 null（不会触发容器去建）。</summary>
+    private static T? Existing<T>() where T : System.Windows.Window
+        => System.Windows.Application.Current?.Windows.OfType<T>().FirstOrDefault();
 
     private void OnFullscreenChanged(object? sender, bool isFullscreen)
     {

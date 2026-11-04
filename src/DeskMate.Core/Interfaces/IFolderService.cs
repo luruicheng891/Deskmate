@@ -18,6 +18,12 @@ public interface IFolderService
     /// <summary>移除引用（不删除磁盘目录）。</summary>
     Task RemoveAsync(string id);
 
+    /// <summary>
+    /// 把移除时的快照原样放回去（同一个 Id、同一个位置、同一套分组与颜色）。
+    /// 撤销靠的是「放回那一份」，不是重新添加一次 —— 重新添加会换新 Id、排到末尾，用户看着就是没撤销干净。
+    /// </summary>
+    Task RestoreAsync(IEnumerable<FolderItem> snapshots);
+
     /// <summary>只改显示名，真实目录名不变。</summary>
     Task RenameDisplayAsync(string id, string newName);
 
@@ -44,6 +50,12 @@ public interface IFolderService
 
     /// <summary>统计目录内文件总数，超过 10000 时返回 10000 并由 UI 显示「10000+」。</summary>
     Task<int> CountFilesAsync(string path);
+
+    /// <summary>
+    /// 一次遍历取回目录足迹（文件数 + 最后修改时间，<paramref name="wantSize"/> 时再称重总大小）。
+    /// 总大小默认不算：那要对树里每个文件 stat 一次，网络盘上代价与「数个数」完全不是一个量级。
+    /// </summary>
+    Task<FolderFootprint> MeasureAsync(string path, bool wantSize);
 
     /// <summary>全部分组，按 Order 升序。</summary>
     IReadOnlyList<FolderGroup> GetGroups();

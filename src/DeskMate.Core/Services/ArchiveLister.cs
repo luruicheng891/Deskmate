@@ -17,7 +17,8 @@ public static class ArchiveLister
 
     private static IReadOnlyList<ArchiveEntryInfo> List(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        // FileShare.Delete：列表还没读完，用户就可能改名或把这个包丢进回收站。
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
 
         var entries = new List<ArchiveEntryInfo>(Math.Min(archive.Entries.Count, FilePreviewRules.MaxArchiveEntries));

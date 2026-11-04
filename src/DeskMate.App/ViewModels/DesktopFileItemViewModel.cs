@@ -8,7 +8,7 @@ namespace DeskMate.App.ViewModels;
 /// 桌面分类里的一个文件。只显示信息 + 提供「打开 / 在资源管理器中显示」，
 /// 任何操作都不会移动或改名桌面上的文件。
 /// </summary>
-public sealed partial class DesktopFileItemViewModel : ObservableObject
+public sealed partial class DesktopFileItemViewModel : ObservableObject, IFocusable
 {
     private readonly FolderManagerViewModel _owner;
     private readonly DesktopFile _file;
@@ -39,6 +39,16 @@ public sealed partial class DesktopFileItemViewModel : ObservableObject
     /// <summary>修改时间文本。日期到「天」就够，时分在窄卡片上会被裁掉。</summary>
     public string ModifiedText => FileText.Modified(_file.ModifiedAt);
 
+    /// <summary>键盘焦点在这条上。</summary>
+    [ObservableProperty]
+    private bool _isFocused;
+
+    string IFocusable.FocusPath => Path;
+
+    bool IFocusable.FocusIsDirectory => false;
+
+    string IFocusable.FocusName => Name;
+
     /// <summary>是否已收藏。桌面文件与搜索结果里的文件卡片都能直接收藏，不必先变成受管文件夹。</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StarGlyph))]
@@ -64,4 +74,20 @@ public sealed partial class DesktopFileItemViewModel : ObservableObject
     /// <summary>右键：在资源管理器中选中该文件。</summary>
     [RelayCommand]
     public void Reveal() => _owner.RevealDesktopFile(this);
+
+    /// <summary>右键「复制路径」。</summary>
+    [RelayCommand]
+    public void CopyPath() => _owner.CopyPath(this);
+
+    /// <summary>右键「打开方式…」。</summary>
+    [RelayCommand]
+    public void OpenWith() => _owner.OpenWith(this);
+
+    /// <summary>右键「重命名」：与浏览列表那一行同一条规则（只改名字、不挪位置、同名与非法字符拒绝）。</summary>
+    [RelayCommand]
+    public void Rename() => _owner.RequestEntryRename(new EntryTarget(Path, Name, false));
+
+    /// <summary>右键「移到回收站」：窗口先二次确认，删除只进回收站。</summary>
+    [RelayCommand]
+    public void Recycle() => _owner.RequestEntryRecycle(new EntryTarget(Path, Name, false));
 }

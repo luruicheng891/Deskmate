@@ -394,9 +394,12 @@ public sealed class NoticeRoutingTests : IDisposable
 
     private (FolderManagerViewModel ViewModel, List<NoticeEventArgs> Notices, FolderService Folders) FolderManager()
     {
-        var folders = new FolderService(Config(), NullLogger<FolderService>.Instance);
+        // 文件夹服务与视图模型必须共用同一份配置实例：视图模型要往里读写浏览排序偏好，
+        // 各造一个的话一边写的另一边看不到。
+        var config = Config();
+        var folders = new FolderService(config, NullLogger<FolderService>.Instance);
         var viewModel = new FolderManagerViewModel(
-            folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), NullLogger<FolderManagerViewModel>.Instance);
+            folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
 
         var notices = new List<NoticeEventArgs>();
         viewModel.UserNotice += (_, args) => notices.Add(args);
@@ -508,11 +511,16 @@ public sealed class NoticeRoutingTests : IDisposable
         public Task<IReadOnlyList<RunningApp>> SnapshotRunningAppsAsync() => Task.FromResult<IReadOnlyList<RunningApp>>([]);
 
         public bool IsRunning(string executablePath, IReadOnlySet<string> runningNames) => false;
+
+        public IDisposable WatchProcessExits(IEnumerable<string> processNames, Action onExit) => new NoExitWatch();
     }
 
     private sealed class NoWindows : IWindowService
     {
         public Task<IReadOnlyList<AppWindowInfo>> GetWindowsAsync(string executablePath)
+            => Task.FromResult<IReadOnlyList<AppWindowInfo>>([]);
+
+        public Task<IReadOnlyList<AppWindowInfo>> GetWindowsByProcessNameAsync(string processName)
             => Task.FromResult<IReadOnlyList<AppWindowInfo>>([]);
 
         public AppWindowInfo? PickClickTarget(IReadOnlyList<AppWindowInfo> windows, nint foregroundHandle)

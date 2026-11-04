@@ -21,17 +21,32 @@ public sealed record BreadcrumbItem(string Display, string Path, bool IsLast);
 /// 文件夹预览里的一行。做成可观察类而不是 record：这一行也能收藏，
 /// 点星星要求状态立刻在界面上翻过来，record 通知不了视图。
 /// </summary>
-public sealed partial class PreviewEntry : ObservableObject
+public sealed partial class PreviewEntry : ObservableObject, IFocusable
 {
     private readonly FolderManagerViewModel _owner;
 
-    /// <summary>构造预览行。<paramref name="path"/> 为空的占位行（「仅显示前 50 项」）不给收藏按钮。</summary>
-    public PreviewEntry(FolderManagerViewModel owner, string name, string path, bool isDirectory)
+    /// <summary>构造预览行。<paramref name="path"/> 为空的占位行（「还有 N 项」那类提示）不给收藏按钮。</summary>
+    /// <param name="sizeBytes">字节数（目录与占位行给 0），排序用；屏幕上看的是 <see cref="SizeText"/>。</param>
+    /// <param name="modified">最后写入时间，排序用；展示文本由建行的那一层算好。</param>
+    public PreviewEntry(
+        FolderManagerViewModel owner,
+        string name,
+        string path,
+        bool isDirectory,
+        long sizeBytes = 0,
+        DateTime modified = default)
     {
         _owner = owner;
         Name = name;
         Path = path;
         IsDirectory = isDirectory;
+        SizeBytes = sizeBytes;
+        ModifiedDate = modified;
+        TypeText = isDirectory
+            ? "文件夹"
+            : HasPath
+                ? (System.IO.Path.GetExtension(path).TrimStart('.').ToUpperInvariant() is { Length: > 0 } ext ? ext : "文件")
+                : string.Empty;
     }
 
     /// <summary>条目名。</summary>
@@ -43,12 +58,31 @@ public sealed partial class PreviewEntry : ObservableObject
     /// <summary>是否为目录。</summary>
     public bool IsDirectory { get; }
 
+    /// <summary>字节数（排序素材；目录与占位行为 0）。</summary>
+    public long SizeBytes { get; }
+
+    /// <summary>最后写入时间（排序素材）。</summary>
+    public DateTime ModifiedDate { get; }
+
+    /// <summary>「类型」列的展示文本：目录=文件夹，文件=大写扩展名。</summary>
+    public string TypeText { get; }
+
     /// <summary>这一行是不是真路径（占位提示行不是）。</summary>
     public bool HasPath => !string.IsNullOrEmpty(Path);
 
     /// <summary>是不是正在右边看内容的那一项（列表与内容同时出现时，得看得出选中了谁）。</summary>
     [ObservableProperty]
     private bool _isSelected;
+
+    /// <summary>键盘焦点在这一行上（方向键走过来的，或鼠标点过它）。</summary>
+    [ObservableProperty]
+    private bool _isFocused;
+
+    string IFocusable.FocusPath => Path;
+
+    bool IFocusable.FocusIsDirectory => IsDirectory;
+
+    string IFocusable.FocusName => Name;
 
     /// <summary>大小文本；目录不显示大小（要现数一遍不值得）。</summary>
     [ObservableProperty]
@@ -89,6 +123,17 @@ public sealed partial class PreviewEntry : ObservableObject
     /// <summary>右键「移到回收站」：窗口会先二次确认。</summary>
     [RelayCommand]
     public void Recycle() => _owner.RequestEntryRecycle(this);
+
+    /// <summary>换成行级写操作的通用目标（收藏页、桌面分类里的同一份文件走的是同一套命令）。</summary>
+    public EntryTarget ToTarget() => new(Path, Name, IsDirectory);
+
+    /// <summary>右键「复制路径」。</summary>
+    [RelayCommand]
+    public void CopyPath() => _owner.CopyPath(this);
+
+    /// <summary>右键「打开方式…」。</summary>
+    [RelayCommand]
+    public void OpenWith() => _owner.OpenWith(this);
 }
 
 /// <summary>
@@ -120,6 +165,10 @@ public sealed partial class GroupTabViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
+    /// <summary>正有卡片往这枚 Tab 上拖（描边亮起来，让落点看得见）。</summary>
+    [ObservableProperty]
+    private bool _isDropTarget;
+
     /// <summary>右键：改这个分组的名字。内置视图由视图模型挡下来并说明原因。</summary>
     [RelayCommand]
     public void Rename() => _owner.BeginRenameGroup(this);
@@ -133,7 +182,7 @@ public sealed partial class GroupTabViewModel : ObservableObject
 /// 文件夹卡片视图模型。<see cref="RealPath"/> 只是引用，
 /// 本类的任何命令都不会改动磁盘上的内容 —— 需求核心原则第一条。
 /// </summary>
-public sealed partial class FolderCardViewModel : ObservableObject
+public sealed partial class FolderCardViewModel : ObservableObject, IFocusable
 {
     private readonly FolderManagerViewModel _owner;
 
@@ -184,6 +233,17 @@ public sealed partial class FolderCardViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
+    /// <summary>键盘焦点在这张卡片上。</summary>
+    [ObservableProperty]
+    private bool _isFocused;
+
+    string IFocusable.FocusPath => RealPath;
+
+    // 卡片本来就只有目录（文件走的是另外两种条目）。
+    bool IFocusable.FocusIsDirectory => true;
+
+    string IFocusable.FocusName => DisplayName;
+
     /// <summary>是否已收藏（右下角星星）。</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StarGlyph))]
@@ -198,10 +258,17 @@ public sealed partial class FolderCardViewModel : ObservableObject
         ? "已收藏 · 点一下从「★ 收藏」里移出"
         : "收藏到「★ 收藏」页 · 只记路径，不动文件";
 
+    /// <summary>卡片悬停说明：失效时把原因直说，只给路径会让人以为是显示没刷出来。</summary>
+    public string Tip => IsValid ? RealPath : $"目录已经不在这里了：{RealPath}";
+
     /// <summary>「＋ 新建」在这条引用失效时不可用：目录都不在了，没地方可建。</summary>
     public bool CanCreate => IsValid;
 
-    partial void OnIsValidChanged(bool value) => OnPropertyChanged(nameof(CanCreate));
+    partial void OnIsValidChanged(bool value)
+    {
+        OnPropertyChanged(nameof(CanCreate));
+        OnPropertyChanged(nameof(Tip));
+    }
 
     [ObservableProperty]
     private int _fileCount;
@@ -243,17 +310,47 @@ public sealed partial class FolderCardViewModel : ObservableObject
     /// <summary>占位图标上的首字母。</summary>
     public string InitialLetter => DisplayName.Length > 0 ? DisplayName[..1].ToUpperInvariant() : "?";
 
+    /// <summary>目录自己的最后修改时间（一次 stat，很便宜），卡片上用来认「哪个是刚动过的」。</summary>
+    [ObservableProperty]
+    private string _modifiedText = string.Empty;
+
+    /// <summary>总大小文本。空 = 还没算过（右键「计算总大小」才扫，不在首屏并发扫盘）。</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSize))]
+    private string _sizeText = string.Empty;
+
+    /// <summary>算不出来（超大、没权限）也要说句话，不能留白让人以为卡片坏了。</summary>
+    [ObservableProperty]
+    private bool _isSizeLoading;
+
+    /// <summary>有没有算出来的大小可显示。</summary>
+    public bool HasSize => SizeText.Length > 0;
+
+    /// <summary>卡片上那一截的完整写法（「共 1.2 GB」），文本前缀放在视图模型而不是 XAML：
+    /// StringFormat 里带中文在部分字体下会被裁成方块。</summary>
+    public string SizeLine => HasSize ? $"共 {SizeText}" : string.Empty;
+
+    partial void OnSizeTextChanged(string value) => OnPropertyChanged(nameof(SizeLine));
+
+    /// <summary>右键「计算总大小」：整棵树称重，结果在本会话内按路径缓存。</summary>
+    [RelayCommand]
+    public Task MeasureSizeAsync() => _owner.MeasureSizeAsync(RealPath, this);
+
     /// <summary>在资源管理器中打开该文件夹 —— 由双击触发。</summary>
     [RelayCommand]
     public void Open() => _owner.OpenCard(this);
 
-    /// <summary>预览内部条目前 50 项 —— 由单击触发。</summary>
+    /// <summary>走进这个目录、列它内部的内容（分页显示）—— 由单击触发。</summary>
     [RelayCommand]
     public void Preview() => _owner.PreviewCard(this);
 
     /// <summary>右键：重命名显示名。</summary>
     [RelayCommand]
     public void Rename() => _owner.BeginRename(this);
+
+    /// <summary>右键「复制路径」：把真实目录路径拿走。</summary>
+    [RelayCommand]
+    public void CopyPath() => _owner.CopyPath(this);
 
     /// <summary>右键：路径失效时改指到新的位置。</summary>
     [RelayCommand]

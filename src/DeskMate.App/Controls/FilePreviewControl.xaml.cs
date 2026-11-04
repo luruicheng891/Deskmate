@@ -20,7 +20,11 @@ public partial class FilePreviewControl : UserControl
         InitializeComponent();
 
         // DataContextChanged 是事件而不是可重写的虚方法（FrameworkElement 上只有这个口子）。
-        DataContextChanged += (_, _) => ScrollCurrentChipIntoViewLater();
+        DataContextChanged += (_, _) =>
+        {
+            ScrollCurrentChipIntoViewLater();
+            ReportPdfViewportLater();
+        };
     }
 
     /// <summary>
@@ -61,5 +65,33 @@ public partial class FilePreviewControl : UserControl
         var usable = e.NewSize.Width - viewport.Padding.Left - viewport.Padding.Right;
 
         preview.SetPdfViewport(usable, VisualTreeHelper.GetDpi(viewport).DpiScaleX);
+    }
+
+    /// <summary>
+    /// 换文件时补报一次宽度。
+    /// <para>
+    /// 只有 <see cref="OnPdfViewportChanged"/> 一条路不够：在同层从一个 PDF 翻到下一个 PDF，
+    /// 栏子宽度一点没变 → 不会再发 SizeChanged → 新挂上来的视图模型一辈子不知道自己要渲多宽，
+    /// 于是 ShowPageAsync 按「还没量到」静默退出，屏幕上就是一块空白。
+    /// 延一拍是因为换 DataContext 的当口 ActualWidth 可能还是 0。
+    /// </para>
+    /// </summary>
+    private void ReportPdfViewportLater()
+    {
+        if (PdfViewport is null)
+        {
+            return; // 首帧之前控件还没建完，构造期的那次 DataContextChanged 走这里
+        }
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (DataContext is not FilePreviewViewModel preview || PdfViewport.ActualWidth <= 0)
+            {
+                return;
+            }
+
+            var usable = PdfViewport.ActualWidth - PdfViewport.Padding.Left - PdfViewport.Padding.Right;
+            preview.SetPdfViewport(usable, VisualTreeHelper.GetDpi(PdfViewport).DpiScaleX);
+        }), DispatcherPriority.Loaded);
     }
 }

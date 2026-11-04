@@ -4,6 +4,7 @@
         xmlns:controls="clr-namespace:DeskMate.App.Controls"
         xmlns:vm="clr-namespace:DeskMate.App.ViewModels"
         Title="DeskMate 文件夹管理"
+        Icon="/Resources/Icons/DeskMate.ico"
         Width="1240"
         Height="780"
         MinWidth="760"
@@ -18,8 +19,32 @@
 
     <Window.Resources>
 
-        <!-- 两种卡片按条目类型自动选模板：文件夹卡片与桌面文件卡片会同时出现在搜索结果里，
-             显式 ItemTemplate 只能给一个 ItemsControl 用，隐式模板才能两边共用。 -->
+        <!-- 列头按钮：只做「像表头、能点、有悬停」，箭头由各按钮自己的 Content 绑对应列的属性
+             （SortNameArrow 等）。当前列出 ↑/↓，其余列是不换行空格占位，宽度不随排序跳动。 -->
+        <Style x:Key="SortHeaderButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="2,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="4">
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <DataTemplate DataType="{x:Type vm:FolderCardViewModel}">
             <controls:FolderCard />
         </DataTemplate>
@@ -32,14 +57,30 @@
                     CornerRadius="12"
                     Cursor="Hand"
                     Background="{DynamicResource SurfaceBrush}"
-                    BorderBrush="{DynamicResource StrokeBrush}"
                     BorderThickness="1"
                     ToolTip="{Binding Location}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <!-- 描边颜色写在 Style 里而不是局部属性：局部值会压住 DataTrigger，焦点画不出来 -->
+                        <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsFocused}" Value="True">
+                                <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
                 <Border.ContextMenu>
                     <ContextMenu MinWidth="200">
                         <MenuItem Header="用关联程序打开" Command="{Binding OpenCommand}" />
+                        <MenuItem Header="打开方式…" Command="{Binding OpenWithCommand}" ToolTip="系统那套「打开方式」面板，不改默认关联" />
                         <MenuItem Header="在资源管理器中显示" Command="{Binding RevealCommand}" />
+                        <MenuItem Header="复制路径" Command="{Binding CopyPathCommand}" />
                         <Separator />
+                        <MenuItem Header="重命名…" Command="{Binding RenameCommand}"
+                                  ToolTip="只改名字，不挪位置。同名或非法字符会被挡下来，什么都不改。" />
+                        <MenuItem Header="移到回收站…" Command="{Binding RecycleCommand}"
+                                  ToolTip="进回收站，之后还能还原。" />
                         <MenuItem Header="加入收藏"
                                   Visibility="{Binding IsFavorite, Converter={StaticResource BoolToVis}, ConverterParameter=invert}"
                                   Command="{Binding ToggleFavoriteCommand}" />
@@ -260,6 +301,11 @@
                         <RadioButton Style="{StaticResource TabPillStyle}"
                                      Content="{Binding Name}"
                                      IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                     AllowDrop="True"
+                                     Tag="{Binding Id}"
+                                     DragOver="OnTabDragOver"
+                                     DragLeave="OnTabDragLeave"
+                                     Drop="OnTabDrop"
                                      Command="{Binding DataContext.SelectTabCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                      CommandParameter="{Binding}">
                             <!-- 分组的名字打错了只能删了重建、再把每个文件夹逐个换回去，所以 Tab 上直接给改名与删除。
@@ -339,7 +385,8 @@
                       VerticalScrollBarVisibility="Auto"
                       Style="{StaticResource ThinScrollViewerStyle}"
                       Visibility="{Binding IsSearchView, Converter={StaticResource BoolToVis}}">
-            <ItemsControl ItemsSource="{Binding SearchHits}"
+            <ItemsControl x:Name="SearchHost"
+                          ItemsSource="{Binding SearchHits}"
                           SizeChanged="OnCardAreaSizeChanged"
                           PreviewMouseLeftButtonUp="OnCardClick"
                           MouseDoubleClick="OnSearchHostDoubleClick">
@@ -376,16 +423,35 @@
                                 CornerRadius="12"
                                 Cursor="Hand"
                                 Background="{DynamicResource SurfaceBrush}"
-                                BorderBrush="{DynamicResource StrokeBrush}"
                                 BorderThickness="1"
                                 ToolTip="{Binding FullPath}">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <!-- 描边颜色必须写在 Style 里：写成局部属性会压住下面的 DataTrigger，焦点就画不出来 -->
+                                    <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsFocused}" Value="True">
+                                            <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
                             <Border.ContextMenu>
                                 <ContextMenu MinWidth="184">
                                     <MenuItem Header="在预览栏看内容"
                                               ToolTip="目录列它里面的东西，文件列它所在的目录"
                                               Command="{Binding PreviewCommand}" />
                                     <MenuItem Header="打开" Command="{Binding OpenCommand}" />
+                                    <MenuItem Header="打开方式…" Command="{Binding OpenWithCommand}" ToolTip="系统那套「打开方式」面板，不改默认关联" />
                                     <MenuItem Header="打开文件位置" Command="{Binding RevealCommand}" />
+                                    <MenuItem Header="复制路径" Command="{Binding CopyPathCommand}" />
+                                    <MenuItem Header="计算总大小" Command="{Binding MeasureSizeCommand}"
+                                              ToolTip="目录要整棵树称重，所以不默认算；算完写进这一行副标题" />
+                                    <Separator />
+                                    <MenuItem Header="重命名…" Command="{Binding RenameCommand}"
+                                              ToolTip="只改名字，不挪位置。同名或非法字符会被挡下来，什么都不改。" />
+                                    <MenuItem Header="移到回收站…" Command="{Binding RecycleCommand}"
+                                              ToolTip="进回收站，之后还能还原。" />
                                     <Separator />
                                     <MenuItem Header="从收藏移出" Command="{Binding UnfavoriteCommand}" />
                                 </ContextMenu>
@@ -501,7 +567,7 @@
 
         <!-- 浏览某个文件夹的内部：主区直接列这一层的东西（像资源管理器那样走进去），
              右边那一栏同时是内容窗格。单击目录 = 走进它，单击文件 = 右边看内容，双击 = 交给系统打开。 -->
-        <Grid Grid.Row="2" Grid.Column="0" Margin="0,10,0,0"
+        <Grid x:Name="BrowseHost" Grid.Row="2" Grid.Column="0" Margin="0,10,0,0"
               Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
@@ -578,18 +644,50 @@
                 </StackPanel>
             </Grid>
 
-            <!-- 表头与条目用同样的固定列宽，名字列吃掉剩余空间，这样标题不会跟内容错位 -->
+            <!-- 表头与条目用同样的固定列宽，名字列吃掉剩余空间，这样标题不会跟内容错位。
+                 列头同时是排序入口：点一下选列、再点翻转方向，箭头跟着走。 -->
             <Grid Grid.Row="1" Margin="10,0,10,4">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="64" />
                     <ColumnDefinition Width="84" />
                     <ColumnDefinition Width="86" />
                     <ColumnDefinition Width="34" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Column="0" Text="名称" Style="{StaticResource CaptionTextStyle}" />
-                <TextBlock Grid.Column="1" Text="大小" Style="{StaticResource CaptionTextStyle}" />
-                <TextBlock Grid.Column="2" Text="修改时间" Style="{StaticResource CaptionTextStyle}" />
+                <Button Grid.Column="0" Click="OnSortHeaderClick" Tag="Name" Style="{StaticResource SortHeaderButtonStyle}"
+                        ToolTip="按名称排序（自然序：章2 排在 章10 前面），再点一次翻转">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="名称" />
+                        <TextBlock Text="{Binding SortNameArrow}" Margin="4,0,0,0" />
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="1" Click="OnSortHeaderClick" Tag="Type" Style="{StaticResource SortHeaderButtonStyle}"
+                        ToolTip="按扩展名归类，再点一次翻转">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="类型" />
+                        <TextBlock Text="{Binding SortTypeArrow}" Margin="4,0,0,0" />
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="2" Click="OnSortHeaderClick" Tag="Size" Style="{StaticResource SortHeaderButtonStyle}"
+                        ToolTip="按字节数从大到小，再点一次翻转">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="大小" />
+                        <TextBlock Text="{Binding SortSizeArrow}" Margin="4,0,0,0" />
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="3" Click="OnSortHeaderClick" Tag="Date" Style="{StaticResource SortHeaderButtonStyle}"
+                        ToolTip="最近改过的在上面，再点一次翻转">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="修改时间" />
+                        <TextBlock Text="{Binding SortDateArrow}" Margin="4,0,0,0" />
+                    </StackPanel>
+                </Button>
+
+                <Button Grid.Column="5" Content="&#xE72C;" Command="{Binding RefreshBrowseCommand}"
+                        Style="{StaticResource IconButtonStyle}" Width="26" Height="22"
+                        ToolTip="重新数这一层（F5）。磁盘被别的程序改动时这里会自动跟上，这一下是手动兜底。" />
             </Grid>
 
             <ListBox Grid.Row="2"
@@ -599,6 +697,7 @@
                      BorderThickness="0"
                      HorizontalContentAlignment="Stretch"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     ScrollViewer.ScrollChanged="OnBrowseListScrolled"
                      PreviewMouseLeftButtonDown="OnPreviewEntryPreviewMouseDown"
                      MouseMove="OnPreviewEntryMouseMove"
                      MouseLeftButtonUp="OnPreviewEntryClick"
@@ -612,6 +711,8 @@
                                     <Border x:Name="Shell"
                                             Padding="{TemplateBinding Padding}"
                                             CornerRadius="7"
+                                            BorderThickness="1"
+                                            BorderBrush="Transparent"
                                             Background="Transparent">
                                         <ContentPresenter />
                                     </Border>
@@ -622,6 +723,10 @@
                                         <!-- 选中看条目自己的 IsSelected（右边正在看它 = 它亮），不是 ListBox 的选择 -->
                                         <DataTrigger Binding="{Binding IsSelected}" Value="True">
                                             <Setter TargetName="Shell" Property="Background" Value="{DynamicResource SelectionBrush}" />
+                                        </DataTrigger>
+                                        <!-- 键盘焦点：描一根 accent 边（粗细本来就是 1，不会抖） -->
+                                        <DataTrigger Binding="{Binding IsFocused}" Value="True">
+                                            <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
                                         </DataTrigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
@@ -644,6 +749,13 @@
                                     <MenuItem Header="在资源管理器中显示"
                                               Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
                                               Command="{Binding RevealCommand}" />
+                                    <MenuItem Header="复制路径"
+                                              Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                              Command="{Binding CopyPathCommand}" />
+                                    <MenuItem Header="打开方式…"
+                                              Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
+                                              ToolTip="系统那套「打开方式」面板，只在文件上出现；不改默认关联"
+                                              Command="{Binding OpenWithCommand}" />
                                     <MenuItem Header="重命名…"
                                               Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
                                               ToolTip="只改名字，不挪位置。同名或非法字符会被挡下来，什么都不改。"
@@ -656,9 +768,11 @@
                             </Grid.ContextMenu>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="64" />
                                 <ColumnDefinition Width="84" />
                                 <ColumnDefinition Width="86" />
                                 <ColumnDefinition Width="34" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Column="0" Orientation="Horizontal">
@@ -677,19 +791,26 @@
                             </StackPanel>
 
                             <TextBlock Grid.Column="1"
+                                       Text="{Binding TypeText}"
+                                       FontSize="11.5"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+
+                            <TextBlock Grid.Column="2"
                                        Text="{Binding SizeText}"
                                        FontSize="11.5"
                                        VerticalAlignment="Center"
                                        Foreground="{DynamicResource TextSecondaryBrush}" />
 
-                            <TextBlock Grid.Column="2"
+                            <TextBlock Grid.Column="3"
                                        Text="{Binding ModifiedText}"
                                        FontSize="11.5"
                                        VerticalAlignment="Center"
                                        Foreground="{DynamicResource TextSecondaryBrush}" />
 
-                            <!-- 每一行都能就地收藏；占位提示行（「仅显示前 50 项」）不是路径，按钮收起来 -->
-                            <Button Grid.Column="3"
+                            <!-- 每一行都能就地收藏；占位提示行（「还有 N 项」那类）不是路径，按钮收起来 -->
+                            <Button Grid.Column="4"
                                     Content="{Binding StarGlyph}"
                                     HorizontalAlignment="Right"
                                     Visibility="{Binding HasPath, Converter={StaticResource BoolToVis}}"
@@ -709,6 +830,22 @@
                     </DataTemplate>
                 </ListBox.ItemTemplate>
             </ListBox>
+
+            <!-- 橡皮筋矩形：与列表同一个格子、写在它之后才盖在它上面；IsHitTestVisible=False，绝不抢列表的点击 -->
+            <Rectangle x:Name="BandRect"
+                       Grid.Row="2"
+                       Width="0"
+                       Height="0"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Top"
+                       IsHitTestVisible="False"
+                       Visibility="Collapsed"
+                       RadiusX="4"
+                       RadiusY="4"
+                       Opacity="0.5"
+                       Stroke="{DynamicResource AccentBrush}"
+                       StrokeThickness="1"
+                       Fill="{DynamicResource AccentSoftBrush}" />
         </Grid>
 
         <!-- 内容窗格：只在选中文件时出现，主区那一列继续摆着这一层的列表 —— 两边同时可见。 -->

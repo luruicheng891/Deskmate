@@ -1,27 +1,16 @@
-# 构建输出
+# 构建产物
 [Bb]in/
 [Oo]bj/
-artifacts/
-tmp/
-
-# Visual Studio
-.vs/
 *.user
 *.suo
+artifacts/
 
-# Rider / VS Code
-.idea/
-.vscode/
+# 本机调试脚本（含抓屏、点击坐标一类的临时探针，不属于源码）
+tmp/
 
-# NuGet
-*.nupkg
-packages/
-.nuget/
+# Visual Studio 本地状态（含本机路径，别提交）
+.vs/
 
-# 测试与覆盖率
-TestResults/
-coverage/
-
-# 系统文件
-.DS_Store
-Thumbs.db
+# 发布输出
+publish/
+*.pubxml

@@ -159,12 +159,16 @@ public sealed class ProcessProbeService : IProcessProbeService
             .ToList();
     });
 
-    /// <summary>主模块路径。32/64 位不匹配或没权限的进程读不到，跳过而不是报错。</summary>
+    /// <summary>
+    /// 主模块路径。32/64 位不匹配或没权限的进程读不到，跳过而不是报错。
+    /// 先用 <c>QueryFullProcessImageName</c>（只要受限查询权限），读不到再退回 <c>MainModule</c>：
+    /// 商店应用（AppContainer）的进程枚举模块常被拒，只走 MainModule 的话它们会被整个跳过。
+    /// </summary>
     private static string? SafeMainModulePath(Process process)
     {
         try
         {
-            var path = process.MainModule?.FileName;
+            var path = PathInterop.TryGetProcessImagePath((uint)process.Id) ?? process.MainModule?.FileName;
             if (string.IsNullOrWhiteSpace(path))
             {
                 return null;
@@ -208,4 +212,77 @@ public sealed class ProcessProbeService : IProcessProbeService
                 return fallback;
             }
         });
+
+    /// <inheritdoc />
+    public IDisposable WatchProcessExits(IEnumerable<string> processNames, Action onExit)
+    {
+        var watch = new ExitWatch(onExit, _logger);
+        watch.Attach(processNames);
+        return watch;
+    }
+
+    /// <summary>
+    /// 一批「等它们退出」的注册。
+    /// <para>
+    /// 用 <see cref="Process.Exited"/> 而不是把轮询加密：轮询加密只是把同一份代价多付几遍，
+    /// 而进程退出是系统会主动通知的 —— 注册一次就换来「它没的那一刻」的回调，一点延迟都不留。
+    /// </para>
+    /// </summary>
+    private sealed class ExitWatch : IDisposable
+    {
+        private readonly Action _onExit;
+        private readonly ILogger _logger;
+        private readonly List<Process> _held = new();
+
+        public ExitWatch(Action onExit, ILogger logger)
+        {
+            _onExit = onExit;
+            _logger = logger;
+        }
+
+        /// <summary>给这批名字当前对应的每个进程都挂上退出通知。已经没了的名字什么都挂不上。</summary>
+        public void Attach(IEnumerable<string> processNames)
+        {
+            foreach (var name in processNames.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                Process[] processes;
+                try
+                {
+                    processes = Process.GetProcessesByName(name);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "挂退出通知时枚举 {Name} 失败", name);
+                    continue;
+                }
+
+                foreach (var process in processes)
+                {
+                    try
+                    {
+                        process.Exited += (_, _) => _onExit();
+                        process.EnableRaisingEvents = true;
+                        _held.Add(process);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 受保护的进程不让注册退出通知；也可能它在我们读到它和这里之间已经退了。
+                        _logger.LogDebug(ex, "{Name} 挂不上退出通知", name);
+                        process.Dispose();
+                    }
+                }
+            }
+        }
+
+        /// <summary>撤掉这批等待注册并归还句柄。<c>Process.Dispose</c> 会连带把退出通知的注册一起撤掉。</summary>
+        public void Dispose()
+        {
+            foreach (var process in _held)
+            {
+                process.Dispose();
+            }
+
+            _held.Clear();
+        }
+    }
 }

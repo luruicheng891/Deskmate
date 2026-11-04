@@ -23,7 +23,7 @@ public class FilePreviewPanelTests : IDisposable
     {
         var config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(config, NullLogger<FolderService>.Instance);
-        _viewModel = new FolderManagerViewModel(_folders, _launcher, _desktop, new FakeFileOperations(), NullLogger<FolderManagerViewModel>.Instance);
+        _viewModel = new FolderManagerViewModel(_folders, _launcher, _desktop, new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
     }
 
     public void Dispose() => _temp.Dispose();

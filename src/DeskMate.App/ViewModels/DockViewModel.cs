@@ -1,9 +1,11 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using DeskMate.App.Services;
 using DeskMate.Core.Interfaces;
 using DeskMate.Core.Models;
+using DeskMate.Interop;
 using Microsoft.Extensions.Logging;
 
 namespace DeskMate.App.ViewModels;
@@ -19,10 +21,27 @@ namespace DeskMate.App.ViewModels;
 public sealed partial class DockViewModel : ObservableObject
 {
     /// <summary>
-    /// 轮询间隔。2 秒是「应用关掉后图标自己消失」的可接受上限；
+    /// 轮询间隔，现在只是兜底。应用关掉后图标要立刻消失，靠的是 <see cref="WindowChangeWatcher"/>
+    /// 的窗口事件；轮询负责兜住事件漏掉的情况（进程被杀、权限不够收不到事件）。
     /// 一次快照只是遍历进程表，版本信息按路径缓存，不会每轮都读盘。
     /// </summary>
     private const int PollIntervalSeconds = 2;
+
+    /// <summary>
+    /// 窗口事件之后等多久再刷新。同一个应用关闭时会连发好几个事件（窗口销毁、隐藏、遮罩），
+    /// 合并成一次；又要足够短，让图标「马上」消失。
+    /// <para>
+    /// 60ms 是「一帧多一点」：一次事件驱动刷新的全部代价约 12 毫秒，再短就是白排一轮。
+    /// 进程退得比这慢的那些（Electron 应用常见）不再靠这里兜，交给 <see cref="_probe"/> 的退出通知。
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan WindowEventDebounce = TimeSpan.FromMilliseconds(60);
+
+    /// <summary>
+    /// 窗口事件之后再补刷新一次的等待时间。它是<b>兜底</b>：进程退出通知挂早了/挂漏了
+    /// （受保护进程挂不上、刚好在挂上之前退掉）时靠这一轮把图标按回正确的样子。
+    /// </summary>
+    private static readonly TimeSpan WindowEventSettle = TimeSpan.FromMilliseconds(1200);
 
     /// <summary>
     /// 悬停时图标会放大到 1.35 倍（见 DockItemControl 的动画），所以取图要按放大后的尺寸去要。
@@ -38,6 +57,24 @@ public sealed partial class DockViewModel : ObservableObject
     private readonly IUsageService _usage;
     private readonly ILogger<DockViewModel> _logger;
     private readonly DispatcherTimer _pollTimer;
+    private readonly DispatcherTimer _eventDebounceTimer;
+    private readonly DispatcherTimer _eventSettleTimer;
+    private readonly WindowChangeWatcher _windowWatcher = new();
+
+    /// <summary>构造时所在的线程的调度器：进程退出回调从后台线程回来要用它。</summary>
+    private readonly Dispatcher _dispatcher;
+
+    /// <summary>「进程还在、一个窗口都没有」的那批固定项的退出通知；名单变了就整批换掉。</summary>
+    private IDisposable? _exitWatch;
+
+    /// <summary>当前挂着退出通知的那些进程名。用名字比对，避免每轮刷新都重挂一遍句柄。</summary>
+    private HashSet<string> _exitWatched = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>已经有一轮刷新在跑（它在 await 期间会让出 UI 线程，不能让第二轮叠上去）。</summary>
+    private bool _refreshing;
+
+    /// <summary>刷新进行期间又来了新请求：这一轮跑完再来一遍。</summary>
+    private bool _refreshAgain;
 
     /// <summary>固定区，顺序与 config.DockItems 一致。</summary>
     private readonly List<DockItemViewModel> _pinned = new();
@@ -65,6 +102,7 @@ public sealed partial class DockViewModel : ObservableObject
         _windows = windows;
         _usage = usage;
         _logger = logger;
+        _dispatcher = Dispatcher.CurrentDispatcher;
 
         // Background 优先级：轮询只是补图标，不该和悬停动画抢渲染。
         _pollTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -72,6 +110,14 @@ public sealed partial class DockViewModel : ObservableObject
             Interval = TimeSpan.FromSeconds(PollIntervalSeconds),
         };
         _pollTimer.Tick += OnPollTick;
+
+        // 事件驱动的两个定时器用 Normal：它们本身只是把刷新排起来，重活在后台线程，
+        // 排在 Background 后面反而会让「关了应用图标还在」又拖回去。
+        _eventDebounceTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = WindowEventDebounce };
+        _eventDebounceTimer.Tick += OnWindowEventTick;
+
+        _eventSettleTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = WindowEventSettle };
+        _eventSettleTimer.Tick += OnWindowEventTick;
     }
 
     /// <summary>Dock 上实际显示的图标：运行区在前、固定区在后。</summary>
@@ -101,17 +147,103 @@ public sealed partial class DockViewModel : ObservableObject
         await RefreshRunningStateAsync();
     }
 
-    /// <summary>启动运行状态轮询。</summary>
+    /// <summary>
+    /// 启动运行状态跟踪：2 秒轮询兜底 + 窗口事件即时触发。必须在 UI 线程调用（窗口事件钩子要消息泵）。
+    /// </summary>
     public void StartRunningPolling()
     {
-        if (!_pollTimer.IsEnabled)
+        var wasStopped = !_pollTimer.IsEnabled;
+        if (wasStopped)
         {
             _pollTimer.Start();
         }
+
+        _windowWatcher.Start(OnWindowsChanged);
+
+        // 停着的那段时间里窗口事件是被丢掉的（见 OnWindowEventTick），不马上补一次的话，
+        // 「人背后开了又关的应用」要一直挂到下一个 2 秒轮询才对得上。
+        if (wasStopped)
+        {
+            _ = RunGuardedRefreshAsync(checkPathsOnDisk: false);
+        }
     }
 
-    /// <summary>停止轮询（窗口隐藏时调用，省 CPU）。</summary>
-    public void StopRunningPolling() => _pollTimer.Stop();
+    /// <summary>停止跟踪（窗口隐藏、拖拽期间调用，省 CPU，也避免在手底下改容器）。</summary>
+    public void StopRunningPolling()
+    {
+        _pollTimer.Stop();
+        _windowWatcher.Stop();
+        _eventDebounceTimer.Stop();
+        _eventSettleTimer.Stop();
+
+        // 挂着的进程句柄跟着一起放掉：停止跟踪期间不欠任何人一个通知。
+        ReleaseExitWatch();
+    }
+
+    /// <summary>别的程序的顶层窗口变了（UI 线程）：排一次合并过的快速刷新，再排一次补刷。</summary>
+    private void OnWindowsChanged()
+    {
+        // 前沿式合并：已经排着就不重启，否则持续有窗口事件时刷新会被无限往后推。
+        if (!_eventDebounceTimer.IsEnabled)
+        {
+            _eventDebounceTimer.Start();
+        }
+
+        // 补刷是后沿式：最后一个事件之后再等一会儿，让刚关的进程有时间真正退出。
+        _eventSettleTimer.Stop();
+        _eventSettleTimer.Start();
+    }
+
+    private async void OnWindowEventTick(object? sender, EventArgs e)
+    {
+        ((DispatcherTimer)sender!).Stop();
+
+        // 跟踪已经停了（窗口隐藏 / 正在拖拽）：这次事件作废，恢复时会自己刷新一遍。
+        if (!_pollTimer.IsEnabled)
+        {
+            return;
+        }
+
+        await RunGuardedRefreshAsync(checkPathsOnDisk: false);
+    }
+
+    /// <summary>
+    /// 轮询与窗口事件共用的刷新入口。刷新里有好几处 await，期间 UI 线程会去处理别的消息，
+    /// 两轮叠在一起会同时改运行区的缓存与顺序，所以同一时刻只放一轮跑，来晚的记一笔、跑完补一遍。
+    /// </summary>
+    /// <param name="checkPathsOnDisk">
+    /// 要不要顺带重问一遍每个固定项的目标还在不在。<b>只在 2 秒轮询与载入时要问</b>：
+    /// 那是 <c>File.Exists</c> 全表，网络盘断的时候一轮能挂好几秒，而关窗事件要的是「立刻改图标」，
+    /// 不该陪着它一起等。
+    /// </param>
+    private async Task RunGuardedRefreshAsync(bool checkPathsOnDisk = true)
+    {
+        if (_refreshing)
+        {
+            _refreshAgain = true;
+            return;
+        }
+
+        _refreshing = true;
+        try
+        {
+            do
+            {
+                _refreshAgain = false;
+                await RefreshRunningStateAsync(checkPathsOnDisk);
+            }
+            while (_refreshAgain && _pollTimer.IsEnabled);
+        }
+        catch (Exception ex)
+        {
+            // 定时器回调里抛出会直接干掉进程，必须就地记录。
+            _logger.LogError(ex, "运行状态刷新失败");
+        }
+        finally
+        {
+            _refreshing = false;
+        }
+    }
 
     /// <summary>
     /// 添加一项并落盘。
@@ -241,18 +373,24 @@ public sealed partial class DockViewModel : ObservableObject
             return;
         }
 
+        var fromClick = Stopwatch.StartNew();
         try
         {
             if (await _windows.SwitchToAsync(ExecutableOf(item)))
             {
                 // 切回窗口同样是用了一次。只统计「新启动」的话，一天点几十次的微信永远进不了「常用」页。
                 _usage.Record(item.ExecutablePath.ToUpperInvariant());
+                _logger.LogDebug("Dock 点「{Name}」：{Ms:F0} ms 切回它已有的窗口", item.DisplayName, fromClick.Elapsed.TotalMilliseconds);
                 return;
             }
 
             _launcher.Launch(item.TargetPath);
             _usage.Record(item.ExecutablePath.ToUpperInvariant());
             item.IsRunning = true;
+
+            // 「从 Dock 打开应用慢」这类报告只有这一行能分清责任：这一段是检查与交给 shell 的代价（本机约几毫秒），
+            // 剩下的时间全在那个应用自己建窗口上 —— 日志里紧接着的「已启动」「已把新起的…抬到前台」两条能各给一个时刻。
+            _logger.LogDebug("Dock 点「{Name}」：{Ms:F0} ms 后已交给系统启动", item.DisplayName, fromClick.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
@@ -297,7 +435,7 @@ public sealed partial class DockViewModel : ObservableObject
                     : $"「{item.DisplayName}」现在没有可关闭的窗口（可能是缩在托盘里）",
                 closed > 0 ? ToastKind.Success : ToastKind.Info);
 
-            await RefreshRunningStateAsync();
+            await RefreshRunningStateAsync(checkPathsOnDisk: false);
         }
         catch (Exception ex)
         {
@@ -546,9 +684,12 @@ public sealed partial class DockViewModel : ObservableObject
     }
 
     /// <summary>重算固定项的运行状态，并把运行区同步成当前开着窗口的应用。</summary>
-    public async Task RefreshRunningStateAsync()
+    public async Task RefreshRunningStateAsync(bool checkPathsOnDisk = true)
     {
-        await RefreshValidityAsync();
+        if (checkPathsOnDisk)
+        {
+            await RefreshValidityAsync();
+        }
 
         var names = await _probe.SnapshotRunningNamesAsync();
         foreach (var item in _pinned)
@@ -558,6 +699,66 @@ public sealed partial class DockViewModel : ObservableObject
 
         await SyncRunningSectionAsync();
         RebuildItems();
+        SyncExitWatch();
+    }
+
+    /// <summary>
+    /// 给「进程还在、一个窗口都没有」的固定项挂上进程退出通知。
+    /// <para>
+    /// 关窗事件到的那一刻进程往往还没走，指示点只能先亮着；等下去就是肉眼可见的延迟。
+    /// 而这批进程什么时候真没了，系统是会主动通知的 —— 挂上它，图标就在那一刻合上。
+    /// </para>
+    /// <para>名单没变就一律不动，免得每 60 毫秒重新挂一遍内核句柄。</para>
+    /// </summary>
+    private void SyncExitWatch()
+    {
+        var wanted = _pinned
+            .Where(item => item.IsRunning && item.IsHiddenInTray)
+            .Select(item => Path.GetFileNameWithoutExtension(ExecutableOf(item)))
+            .Where(name => name.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (wanted.SetEquals(_exitWatched))
+        {
+            return;
+        }
+
+        _exitWatch?.Dispose();
+        _exitWatch = wanted.Count == 0 ? null : _probe.WatchProcessExits(wanted, OnWatchedProcessExit);
+        _exitWatched = wanted;
+    }
+
+    /// <summary>被盯的进程退出了（回调在后台线程）：回到 UI 线程再刷一次。</summary>
+    private void OnWatchedProcessExit() => _dispatcher.InvokeAsync(async () =>
+    {
+        // 隐藏与拖拽期间不刷：前者恢复时会自己补一次，后者会在用户手底下挪容器。
+        if (_pollTimer.IsEnabled)
+        {
+            await ProcessesExitedAsync();
+        }
+    });
+
+    /// <summary>
+    /// 进程退了之后的应答：补一次「不扫磁盘」的快速刷新，指示点当场合上。
+    /// <para>
+    /// 公开的唯一理由是单测验得了这一跳 —— 测试线程没有 WPF 消息泵，上面那句 <c>InvokeAsync</c>
+    /// 排进去就出不来；排队那一层本身没有分支，不值得为它造一条线程。
+    /// </para>
+    /// </summary>
+    public Task ProcessesExitedAsync()
+    {
+        // 先把这一批句柄放下，让紧随其后的刷新按「此刻活着的进程」重新挂一遍：
+        // 有的应用退了又立刻起来（自启、自动更新），只按名字比对认不出这种换人，就会从此收不到退出通知。
+        ReleaseExitWatch();
+        return RunGuardedRefreshAsync(checkPathsOnDisk: false);
+    }
+
+    /// <summary>放掉当前挂着的退出监视，并把名单清空 —— 下一轮刷新想盯什么会重新挂。</summary>
+    private void ReleaseExitWatch()
+    {
+        _exitWatch?.Dispose();
+        _exitWatch = null;
+        _exitWatched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>向用户播报一条提示（由 <see cref="ToastService"/> 显示成非模态浮层）。</summary>
@@ -755,18 +956,7 @@ public sealed partial class DockViewModel : ObservableObject
         }
     }
 
-    private async void OnPollTick(object? sender, EventArgs e)
-    {
-        try
-        {
-            await RefreshRunningStateAsync();
-        }
-        catch (Exception ex)
-        {
-            // 定时器回调里抛出会直接干掉进程，必须就地记录。
-            _logger.LogError(ex, "运行状态轮询失败");
-        }
-    }
+    private async void OnPollTick(object? sender, EventArgs e) => await RunGuardedRefreshAsync();
 
     private DockItemViewModel? Find(string id) => Items.FirstOrDefault(item => item.Id == id);
 

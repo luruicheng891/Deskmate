@@ -7,7 +7,7 @@ namespace DeskMate.App.ViewModels;
 /// 「★ 收藏」页里的一张卡片。收藏的是路径引用，目录、文件、压缩包都收，
 /// 打开走系统默认方式（目录=资源管理器，文件=关联程序），DeskMate 不碰文件本身。
 /// </summary>
-public sealed partial class FavoriteCardViewModel : ObservableObject
+public sealed partial class FavoriteCardViewModel : ObservableObject, IFocusable
 {
     private readonly FolderManagerViewModel _owner;
 
@@ -31,6 +31,16 @@ public sealed partial class FavoriteCardViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _isDirectory;
+
+    /// <summary>键盘焦点在这张收藏卡片上。</summary>
+    [ObservableProperty]
+    private bool _isFocused;
+
+    string IFocusable.FocusPath => FullPath;
+
+    bool IFocusable.FocusIsDirectory => IsDirectory;
+
+    string IFocusable.FocusName => Title;
 
     [ObservableProperty]
     private bool _isValid = true;
@@ -60,6 +70,26 @@ public sealed partial class FavoriteCardViewModel : ObservableObject
     /// <summary>右键：在资源管理器中选中它。</summary>
     [RelayCommand]
     public void Reveal() => _owner.RevealFavorite(this);
+
+    /// <summary>右键「复制路径」。</summary>
+    [RelayCommand]
+    public void CopyPath() => _owner.CopyPath(this);
+
+    /// <summary>右键「打开方式…」。</summary>
+    [RelayCommand]
+    public void OpenWith() => _owner.OpenWith(this);
+
+    /// <summary>右键「重命名」：只改名字、不挪位置；收藏里那条路径引用会跟着换。</summary>
+    [RelayCommand]
+    public void Rename() => _owner.RequestEntryRename(new EntryTarget(FullPath, Title, IsDirectory));
+
+    /// <summary>右键「移到回收站」：窗口先二次确认；成功后这条收藏自动撤掉（不然留下一个点开就报错的引用）。</summary>
+    [RelayCommand]
+    public void Recycle() => _owner.RequestEntryRecycle(new EntryTarget(FullPath, Title, IsDirectory));
+
+    /// <summary>右键「计算总大小」填进来那行副标题（目录要整棵树称重，不默认算）。</summary>
+    [RelayCommand]
+    public Task MeasureSizeAsync() => _owner.MeasureSizeAsync(FullPath, this);
 
     /// <summary>右键或点星星：取消收藏。只去掉配置里的一行，磁盘上什么都不动。</summary>
     [RelayCommand]

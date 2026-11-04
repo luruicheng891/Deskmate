@@ -79,7 +79,7 @@ public sealed class PdfPreviewSession
             path,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete,
             16 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
 

@@ -6,7 +6,9 @@ namespace DeskMate.Core.Services;
 /// <summary>
 /// 读文本 / 代码内容。两条硬要求都写在实现里：
 /// <list type="number">
-/// <item><description>不能锁文件：用户的 .c 正开在 Keil 里、log 正在被写的时候也要能预览，所以一律 <see cref="FileShare.ReadWrite"/>。</description></item>
+/// <item><description>不能锁文件：用户的 .c 正开在 Keil 里、log 正在被写的时候也要能预览，所以一律 <see cref="FileShare.ReadWrite"/>；
+/// 还额外给 <see cref="FileShare.Delete"/> —— 预览是在后台读的，读的过程中用户就可能按 F2 改名或删掉，
+/// 少了这一位那一下会报「文件被占用」，而它其实是自家程序正拿着句柄。</description></item>
 /// <item><description>不能猜编码猜到乱码：BOM → 严格 UTF-8 → GB18030（中文 Windows 上老工程最常见的就是它）→ Latin-1 兜底，
 /// 并且把实际用的编码名带回界面 —— 注释是乱码时用户得知道我们按什么解的。</description></item>
 /// </list>
@@ -25,7 +27,7 @@ public static class TextPreviewReader
             path,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete,
             16 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
 

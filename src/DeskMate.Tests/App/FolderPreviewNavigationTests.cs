@@ -28,7 +28,7 @@ public class FolderPreviewNavigationTests : IDisposable
 
         var config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(config, NullLogger<FolderService>.Instance);
-        _viewModel = new FolderManagerViewModel(_folders, _launcher, new FakeDesktopFileService(), new FakeFileOperations(), NullLogger<FolderManagerViewModel>.Instance);
+        _viewModel = new FolderManagerViewModel(_folders, _launcher, new FakeDesktopFileService(), new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
     }
 
     [Fact]
@@ -45,7 +45,7 @@ public class FolderPreviewNavigationTests : IDisposable
     }
 
     [Fact]
-    public async Task PreviewCard_TellsTheUserTheListIsTruncated()
+    public async Task PreviewCard_ListsTheFirstPageAndSaysHowManyAreLeft()
     {
         var big = MakeDir("很多文件");
         for (var index = 0; index < 55; index++)
@@ -58,9 +58,82 @@ public class FolderPreviewNavigationTests : IDisposable
 
         _viewModel.Cards.Single(candidate => candidate.Id == item.Id).Preview();
 
-        // 只画 50 条而不说后面还有，用户就会认为这个目录只有 50 个文件。
+        // 第一屏只画一批，但末尾必须说清后面还有几条：不吭声就等于告诉用户「这个目录只有 50 个文件」。
         Assert.Equal(51, _viewModel.PreviewItems.Count);
-        Assert.Contains("仅显示前 50 项", _viewModel.PreviewItems[50].Name);
+        Assert.Contains("还有 5 项", _viewModel.PreviewItems[50].Name);
+
+        // 滚到底补下一批：剩下的 5 条要真能出现，而且补完后提示行该撤掉。
+        _viewModel.LoadMoreIfNeeded();
+        Assert.Equal(55, _viewModel.PreviewItems.Count);
+        Assert.DoesNotContain(_viewModel.PreviewItems, entry => entry.Name.StartsWith("还有", StringComparison.Ordinal));
+
+        // 再滚不该无限膨胀。
+        _viewModel.LoadMoreIfNeeded();
+        Assert.Equal(55, _viewModel.PreviewItems.Count);
+    }
+
+    [Fact]
+    public async Task ToggleSort_SizeDescending_PutsTheBiggestFileFirstAmongFiles()
+    {
+        // 造一个明显更大的文件（说明.txt 只有 2 字节），要在打开预览之前：
+        // 排序只重排已经数到的快照，先打开再写文件等于排一个不含它的表。
+        File.WriteAllText(Path.Combine(_root, "大图.png"), new string('x', 4096));
+        await OpenPreviewAsync();
+
+        await _viewModel.ToggleSortAsync("Size");
+
+        // 目录恒排在文件前面（资源管理器的第一直觉），换列的默认方向 = 大到小。
+        Assert.True(_viewModel.SortDescending);
+        var rows = _viewModel.PreviewItems.Where(entry => entry.HasPath).ToList();
+        Assert.True(rows[0].IsDirectory);
+        Assert.True(rows[1].IsDirectory);
+        Assert.Equal("大图.png", rows[2].Name);
+
+        // 再点一次同一列 = 翻转方向，最小的文件排到最前。
+        await _viewModel.ToggleSortAsync("Size");
+        Assert.False(_viewModel.SortDescending);
+        Assert.Equal("说明.txt", _viewModel.PreviewItems.Where(entry => !entry.IsDirectory && entry.HasPath).First().Name);
+    }
+
+    [Fact]
+    public async Task ToggleSort_Name_UsesNaturalOrderAndIsPersisted()
+    {
+        var sorted = MakeDir("章节");
+        foreach (var name in new[] { "第10章.md", "第2章.md", "第1章.md" })
+        {
+            File.WriteAllText(Path.Combine(sorted, name), "x");
+        }
+
+        var item = await _folders.AddAsync(sorted);
+        await _viewModel.LoadAsync();
+        _viewModel.Cards.Single(candidate => candidate.Id == item.Id).Preview();
+
+        var names = _viewModel.PreviewItems.Select(entry => entry.Name).ToList();
+        Assert.Equal(["第1章.md", "第2章.md", "第10章.md"], names);
+
+        // 排序偏好是全局的：切换一次就要写回 config，下次打开面板还是它。
+        await _viewModel.ToggleSortAsync("Date");
+        Assert.Equal("Date", await ReadSavedSortAsync());
+    }
+
+    private async Task<string> ReadSavedSortAsync()
+    {
+        var json = await File.ReadAllTextAsync(Path.Combine(_temp.Path, "config.json"));
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("browseSortBy", out var value) ? value.GetString() ?? string.Empty : string.Empty;
+    }
+
+    [Fact]
+    public async Task RefreshBrowse_PicksUpFilesOtherProgramsAdded()
+    {
+        await OpenPreviewAsync();
+
+        // 面板开着的期间，别的程序往这一层写了一个文件。
+        File.WriteAllText(Path.Combine(_root, "别人写的.txt"), "x");
+
+        _viewModel.RefreshBrowseCommand.Execute(null);
+
+        Assert.Contains(_viewModel.PreviewItems, entry => entry.Name == "别人写的.txt");
     }
 
     [Fact]

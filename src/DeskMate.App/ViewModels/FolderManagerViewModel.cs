@@ -18,8 +18,23 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     private const string AllTabId = "all";
     private const string UngroupedTabId = "none";
     private const string FavoritesTabId = "fav";
-    private const int PreviewLimit = 50;
+
+    /// <summary>浏览列表一屏渲染多少行；滚到底自动补下一批。</summary>
+    private const int BrowsePageSize = 50;
+
+    /// <summary>
+    /// 单层快照的条数上限。到顶就不追了（盘上百万项的目录，列举+排序的代价压过「这里也能看完全部」的价值），
+    /// 并在列表末尾把话说清楚、给出资源管理器出口。
+    /// </summary>
+    private const int BrowseSnapshotCap = 20000;
+
     private const int DebounceMs = 150;
+
+    /// <summary>磁盘变化防抖：一次复制能打出几十条 watcher 事件，不能条条重举。</summary>
+    private const int BrowseRefreshDebounceMs = 400;
+
+    /// <summary>watcher 挂不上（网络盘等）时的兜底重举间隔。</summary>
+    private static readonly TimeSpan BrowsePollInterval = TimeSpan.FromSeconds(60);
 
     /// <summary>需求 M3：预设 8 色标签。</summary>
     public static readonly IReadOnlyList<string> ColorPalette =
@@ -32,14 +47,63 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     private readonly IAppLauncherService _launcher;
     private readonly IDesktopFileService _desktopFiles;
     private readonly IFileOperationService _files;
+    private readonly IConfigService _config;
     private readonly ILogger<FolderManagerViewModel> _logger;
     private readonly DispatcherTimer _debounce;
     private readonly Dispatcher _dispatcher;
     private readonly List<FolderItem> _all = new();
 
+    // ==================== 浏览列表：全量快照 + 分页 + 排序 + 磁盘监听 ====================
+
+    /// <summary>当前这一层数到的全部条目（已按当前列排好序）。</summary>
+    private readonly List<BrowseEntry> _browseSnapshot = new();
+
+    /// <summary><see cref="PreviewItems"/> 里已渲染的真实行数（末尾的提示行不算）。</summary>
+    private int _browseRendered;
+
+    /// <summary>快照截到上限说明这层太大，末尾要给出资源管理器出口。</summary>
+    private bool _browseCapped;
+
+    /// <summary>重渲染时要保住的行（正在看的内容、或原来选中的那一项）。</summary>
+    private string _browseAnchorPath = string.Empty;
+
+    private FileSystemWatcher? _browseWatcher;
+    private DispatcherTimer? _browseDebounce;
+    private DispatcherTimer? _browseFallback;
+    private bool _browseLive;
+    private int _browseGeneration;
+
+    /// <summary>后台列举正在进行：列表末尾给一行「正在数」，不许说成空目录。</summary>
+    private bool _browseLoading;
+
+    /// <summary>上一次加载还没回来时的信号（给 <see cref="WaitForBrowsePageAsync"/> 用）。</summary>
+    private TaskCompletionSource? _browsePending;
+
+    /// <summary>排序列。config 里的坏值回落 Name。</summary>
+    private BrowseSortKey _sortKey = BrowseSortKey.Name;
+
+    /// <summary>是否降序（翻转列内次序，目录优先不动）。</summary>
+    private bool _sortDescending;
+
+    /// <summary>列表里每一项的素材（名字/大小/时间），渲染成行时再包 <see cref="PreviewEntry"/>。</summary>
+    private sealed record BrowseEntry(string Path, string Name, bool IsDirectory, long SizeBytes, DateTime Modified);
+
     private FolderCardViewModel? _contextCard;
     private FolderCardViewModel? _renameTarget;
     private CancellationTokenSource? _countCts;
+
+    /// <summary>
+    /// 按路径缓存的目录足迹（文件数 + 最后修改时间，称过重的还带大小）。
+    /// 以前每次切 Tab 都对每张卡片重新全树遍历一遍 —— 屏幕上是十几张卡，就是一十几轮扫盘，
+    /// 机械盘与网盘上「切个标签页卡一下」正是这么来的。
+    /// </summary>
+    private readonly Dictionary<string, FolderFootprint> _footprints = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 真的去扫过盘几次（缓存命中不算）。给单测与自检用：
+    /// 「切个标签页又把每张卡重数一遍」这类回归，只有把次数摆出来才看得见。
+    /// </summary>
+    public int FootprintProbes { get; private set; }
 
     // 预览面板的下钻状态：点进子目录之后要能一层层退回去。
     private readonly Stack<string> _previewBack = new();
@@ -54,14 +118,20 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         IAppLauncherService launcher,
         IDesktopFileService desktopFiles,
         IFileOperationService files,
+        IConfigService config,
         ILogger<FolderManagerViewModel> logger)
     {
         _folders = folders;
         _launcher = launcher;
         _desktopFiles = desktopFiles;
         _files = files;
+        _config = config;
         _logger = logger;
         _dispatcher = Dispatcher.CurrentDispatcher;
+
+        // 排序偏好是全局的：在所有文件夹里都按同一列排，开面板不用每层重选一遍。
+        _sortKey = BrowseSorter.ParseKey(config.Current.BrowseSortBy);
+        _sortDescending = config.Current.BrowseSortDescending;
 
         _debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(DebounceMs) };
         _debounce.Tick += OnDebounceTick;
@@ -94,10 +164,10 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     public event EventHandler<NoticeEventArgs>? UserNotice;
 
     /// <summary>某一行的「重命名」：请窗口弹输入框（要当场校验非法名与重名）。</summary>
-    public event EventHandler<PreviewEntry>? EntryRenameRequested;
+    public event EventHandler<EntryTarget>? EntryRenameRequested;
 
     /// <summary>某一行的「移到回收站」：请窗口先二次确认，那一下是不可逆感最强的操作。</summary>
-    public event EventHandler<PreviewEntry>? EntryDeleteConfirmRequested;
+    public event EventHandler<EntryTarget>? EntryDeleteConfirmRequested;
 
     /// <summary>当前展示的卡片。</summary>
     public ObservableCollection<FolderCardViewModel> Cards { get; } = new();
@@ -176,7 +246,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
     /// <summary>底部操作提示，跟着当前视图换。</summary>
     public string ViewHint => IsBrowsing
-        ? "单击目录 = 走进它 · 单击文件 = 右边看内容（列表留着，两边同时看） · 双击 = 交给系统打开 · ← 先收内容窗格，再退一层 · 按住可拖到微信 / 浏览器上传区"
+        ? "单击目录 = 走进它 · 单击文件 = 右边看内容（列表留着，两边同时看） · 双击 = 交给系统打开 · Ctrl 加选 / Shift 连选 · 方向键走、回车展开、Ctrl+回车打开、Backspace 退一层 · 按住空白处可框选 · 多选后一次拖出"
         : IsSearchView
             ? "搜索结果跨受管文件夹与桌面文件 · 单击看内容 · 双击打开 · 没找到要的文件的话，Alt+Space 的全局搜索还能搜进受管目录里面"
         : IsFavoritesView
@@ -270,6 +340,12 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     public event EventHandler<FilePreviewViewModel>? FilePopoutRequested;
 
     /// <summary>
+    /// 重举之后要把哪一行带回视野（排序切换、磁盘自动刷新、手动 F5 都会甩一次列表，
+    /// 不锚住滚动位置就等于「看着看着自己跳回顶部」）。参数是那一行的路径。
+    /// </summary>
+    public event EventHandler<string>? ScrollToEntryRequested;
+
+    /// <summary>
     /// 卡片宽度：由窗口报进来的「卡片区实测宽度」算出能放几列，再把宽度平分。
     /// 以前三种卡片各写各的 212 / 256 DIP，结果右边内容窗格一开（520 DIP），
     /// 左边刚好只塞得下一列 —— 大片空白留在中间，用户读成「地方明明够，为什么不排两排」。
@@ -284,6 +360,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
     private double _cardItemWidth = 256;
 
+    /// <summary>卡片网格当前几列 —— 方向键的「上/下」要走这么宽的一步。</summary>
+    public int CardColumns { get; private set; } = 1;
+
     /// <summary>
     /// 窗口报来卡片区的实际可用宽度（已经扣掉滚动条），这里决定列数。
     /// </summary>
@@ -297,6 +376,12 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         var columns = Math.Max(1, (int)((width + CardGap) / (CardMinWidth + CardGap)));
         var item = Math.Floor(width / columns) - CardGap;
 
+        // 列数要在「宽度没变就早退」之前记下：键盘导航认的是列数。
+        if (columns != CardColumns)
+        {
+            CardColumns = columns;
+        }
+
         if (Math.Abs(item - _cardItemWidth) < 1)
         {
             return;
@@ -304,6 +389,269 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         _cardItemWidth = item;
         OnPropertyChanged(nameof(CardItemWidth));
+    }
+
+    // ==================== 键盘焦点 ====================
+
+    private IFocusable? _focused;
+
+    /// <summary>焦点换了条目时由窗口订阅：把它滚进视野。</summary>
+    public event EventHandler? FocusChanged;
+
+    /// <summary>当前持有键盘焦点的条目（没有就是 null）。</summary>
+    public IFocusable? FocusedItem => _focused;
+
+    /// <summary>
+    /// 现在该由哪个列表接住方向键。四个视图各自一份集合，且浏览态优先
+    /// （浏览时主区是列表，卡片网格已经收起来了）。
+    /// </summary>
+    private System.Collections.IList FocusHost => IsBrowsing
+        ? PreviewItems
+        : IsSearchView
+            ? SearchHits
+            : IsFavoritesView
+                ? FavoriteCards
+                : IsDesktopView
+                    ? DesktopFiles
+                    : Cards;
+
+    /// <summary>鼠标点某一条时同步焦点：点了 A 再按回车，该动的是 A。</summary>
+    public void SetFocus(object? item)
+    {
+        var next = item as IFocusable;
+        if (ReferenceEquals(next, _focused))
+        {
+            return;
+        }
+
+        ApplyFocus(next);
+    }
+
+    /// <summary>
+    /// 方向键移动焦点。网格视图按二维走（左右 ±1、上下 ±列数），浏览列表是一维（上下 ±1）。
+    /// 越界就停在原地 —— 从最后一行「往下」不该跳回第一行，那会让人以为按键失灵。
+    /// </summary>
+    public void MoveFocus(int horizontal, int vertical)
+    {
+        var host = FocusHost;
+
+        if (host.Count == 0)
+        {
+            return;
+        }
+
+        var grid = !IsBrowsing;
+        var columns = Math.Max(1, CardColumns);
+        var index = IndexOf(host, _focused);
+        var step = grid ? horizontal + vertical * columns : vertical + horizontal;
+
+        if (step == 0)
+        {
+            return;
+        }
+
+        // 还没焦点时，方向键从第一条（或最后一条）起步，和文件管理器一致。
+        var target = index < 0
+            ? step > 0 ? 0 : host.Count - 1
+            : index + step;
+
+        if (target < 0 || target >= host.Count)
+        {
+            return;
+        }
+
+        ApplyFocus(host[target] as IFocusable);
+    }
+
+    /// <summary>Home：焦点跳到这一页第一条。</summary>
+    public void MoveFocusToFirst() => ApplyFocus(FocusHost.Count > 0 ? FocusHost[0] as IFocusable : null);
+
+    /// <summary>End：焦点跳到这一页最后一条。</summary>
+    public void MoveFocusToLast() => ApplyFocus(FocusHost.Count > 0 ? FocusHost[FocusHost.Count - 1] as IFocusable : null);
+
+    /// <summary>
+    /// 回车 = 展开焦点条目（目录走进去 / 文件看内容）；Ctrl+回车 = 交给系统打开。
+    /// 返回 false 表示这条没得动（占位提示行）。
+    /// </summary>
+    public bool ActivateFocused(bool openExternally)
+    {
+        if (_focused is not { } item || item.FocusPath.Length == 0)
+        {
+            return false;
+        }
+
+        if (openExternally)
+        {
+            OpenExternally(item.FocusPath, item.FocusName);
+            return true;
+        }
+
+        switch (item)
+        {
+            case PreviewEntry row when row.IsDirectory:
+                EnterFolder(row);
+                break;
+            case PreviewEntry row:
+                PreviewFile(row.Path);
+                break;
+            case FolderCardViewModel card:
+                PreviewCard(card);
+                break;
+            case FavoriteCardViewModel favorite:
+                PreviewFavorite(favorite);
+                break;
+            case DesktopFileItemViewModel file:
+                PreviewFile(file.Path);
+                break;
+            default:
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Backspace / Alt+↑：退一层；已经在顶层就退出浏览，回到卡片网格。</summary>
+    public void GoUpOneLevel()
+    {
+        if (!IsPreviewOpen)
+        {
+            return;
+        }
+
+        if (_previewBack.Count > 0)
+        {
+            ShowPreview(_previewBack.Pop());
+            return;
+        }
+
+        ClosePreview();
+    }
+
+    /// <summary>
+    /// 内容窗格开着时翻同层的上一个/下一个文件（← → 的那一下）。
+    /// 顺序与胶囊条、◀ ▶ 按钮共用视图模型里那一份，不再自己枚举第二遍。
+    /// </summary>
+    public void StepSiblingFile(int delta)
+    {
+        if (FilePreview is not { } preview)
+        {
+            return;
+        }
+
+        if (delta < 0)
+        {
+            preview.PreviousFileCommand.Execute(null);
+        }
+        else if (delta > 0)
+        {
+            preview.NextFileCommand.Execute(null);
+        }
+    }
+
+    private void ApplyFocus(IFocusable? next)
+    {
+        if (_focused is { } previous && !ReferenceEquals(previous, next))
+        {
+            previous.IsFocused = false;
+        }
+
+        _focused = next;
+
+        if (next is { } focused)
+        {
+            focused.IsFocused = true;
+        }
+
+        FocusChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// 列表被重画之后按路径把焦点找回来（排序、分页补批、自动刷新都会重建条目对象）。
+    /// 不这么做的话，方向键走到第 8 行、磁盘一变焦点就丢，接着按方向键会从第一条重新开始。
+    /// </summary>
+    private void RestoreFocusByPath()
+    {
+        var path = _focused?.FocusPath ?? string.Empty;
+
+        if (path.Length == 0)
+        {
+            return;
+        }
+
+        var match = FindByPath(FocusHost, path);
+
+        if (match is not null && !ReferenceEquals(match, _focused))
+        {
+            ApplyFocus(match);
+        }
+    }
+
+    private static IFocusable? FindByPath(System.Collections.IList host, string path)
+        => host.OfType<IFocusable>().FirstOrDefault(item => SamePath(item.FocusPath, path));
+
+    /// <summary>把焦点条目的路径放进剪贴板。「这个东西在哪」是最常需要拿走的信息。</summary>
+    public void CopyPath(IFocusable? item)
+    {
+        if (item is null || item.FocusPath.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            System.Windows.Clipboard.SetText(item.FocusPath);
+            OnNotice($"已复制路径：{item.FocusPath}", ToastKind.Success);
+        }
+        catch (Exception ex)
+        {
+            // 剪贴板被别的程序占着是真会发生的（Win11 的剪贴板历史尤其如此），不能说没反应就完了。
+            _logger.LogDebug(ex, "复制路径失败 {Path}", item.FocusPath);
+            OnNotice($"复制失败：剪贴板现在被别的程序占着，过一下再试。");
+        }
+    }
+
+    /// <summary>「打开方式…」：把这一行交给系统挑选程序。</summary>
+    public void OpenWith(IFocusable? item)
+    {
+        if (item is null || item.FocusPath.Length == 0)
+        {
+            return;
+        }
+
+        // 目录没有「换个程序打开」这一说，给它选程序只会弹一个没用的框。
+        if (item.FocusIsDirectory)
+        {
+            OnNotice("文件夹没有「打开方式」，双击就是在资源管理器里打开它。", ToastKind.Info);
+            return;
+        }
+
+        try
+        {
+            ShellOpenWith.Show(item.FocusPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "打开设法面板失败 {Path}", item.FocusPath);
+            OnNotice($"系统没给出「打开方式」面板：{ex.Message}");
+        }
+    }
+
+    private static int IndexOf(System.Collections.IList host, IFocusable? item)
+    {
+        if (item is null)
+        {
+            return -1;
+        }
+
+        for (var index = 0; index < host.Count; index++)
+        {
+            if (ReferenceEquals(host[index], item))
+            {
+                return index;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>重命名浮层是否可见。</summary>
@@ -415,6 +763,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             }
         }
 
+        InvalidateFootprints();
         RebuildSource();
         RebuildTabs();
         ApplyFilter();
@@ -449,6 +798,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         try
         {
             var item = await _folders.RelocateAsync(id, newPath);
+            InvalidateFootprints();
             RebuildSource();
             RebuildTabs();
             ApplyFilter();
@@ -509,9 +859,117 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// <summary>单击卡片：在右侧面板里预览这个目录的内容。</summary>
     public void PreviewCard(FolderCardViewModel card)
     {
+        SetFocus(card);
         _previewBack.Clear();
         _previewCard = card;
         ShowPreview(card.RealPath);
+    }
+
+    /// <summary>列表里当前选了几行。</summary>
+    public int SelectedRowCount => _rowSelection.Count;
+
+    /// <summary>
+    /// 列表那一侧的单击。返回 true 表示这一行该被「展开」（目录走进去 / 文件看内容）。
+    /// <para>
+    /// Ctrl 加选与 Shift 连选以前只有卡片有，列表里没有 —— 想批量拖出几个文件就得一个个拖。
+    /// 点目录时不认 Ctrl/Shift 的展开：切页会把人正在看的那一层顶掉。
+    /// </para>
+    /// </summary>
+    public bool HandleRowClick(PreviewEntry row, bool ctrl, bool shift)
+    {
+        if (!row.HasPath)
+        {
+            return false; // 「还有 N 项」那类提示行不进选区，也不展开
+        }
+
+        SetFocus(row);
+
+        var paths = PreviewItems.Where(entry => entry.HasPath).Select(entry => entry.Path).ToList();
+        var index = paths.FindIndex(path => SamePath(path, row.Path));
+
+        if (shift && _rowAnchorPath.Length > 0)
+        {
+            var anchor = paths.FindIndex(path => SamePath(path, _rowAnchorPath));
+
+            if (anchor >= 0 && index >= 0)
+            {
+                for (var step = Math.Min(anchor, index); step <= Math.Max(anchor, index); step++)
+                {
+                    _rowSelection.Add(paths[step]);
+                }
+
+                SyncRowSelection();
+                return false;
+            }
+        }
+
+        if (ctrl)
+        {
+            if (!_rowSelection.Remove(row.Path))
+            {
+                _rowSelection.Add(row.Path);
+            }
+
+            _rowAnchorPath = row.Path;
+            SyncRowSelection();
+
+            // Ctrl 点文件顺手看一眼；Ctrl 点目录不切页（切页会顶掉人正在看的那一层）。
+            return !row.IsDirectory && _rowSelection.Contains(row.Path);
+        }
+
+        _rowSelection.Clear();
+        _rowSelection.Add(row.Path);
+        _rowAnchorPath = row.Path;
+        SyncRowSelection();
+        return true;
+    }
+
+    /// <summary>列表里当前选中的那些路径（自检与「批量到底选中了几条」的判据）。</summary>
+    public IReadOnlyList<string> BatchRowPaths() => [.. PreviewItems.Where(entry => entry.HasPath && _rowSelection.Contains(entry.Path)).Select(entry => entry.Path)];
+
+    /// <summary>拖出要带走的路径：选中多行就一次全带走，否则只带按住的那一行。</summary>
+    public IReadOnlyList<string> DragRowPaths(PreviewEntry row)
+        => _rowSelection.Count > 1 && _rowSelection.Contains(row.Path)
+            ? PreviewItems.Where(entry => entry.HasPath && _rowSelection.Contains(entry.Path)).Select(entry => entry.Path).ToArray()
+            : [row.Path];
+
+    /// <summary>清掉列表选区（框选完、删除后、退出浏览时）。</summary>
+    public void ClearRowSelection()
+    {
+        _rowSelection.Clear();
+        _rowAnchorPath = string.Empty;
+        SyncRowSelection();
+    }
+
+    private void SyncRowSelection()
+    {
+        foreach (var entry in PreviewItems)
+        {
+            entry.IsSelected = entry.HasPath && _rowSelection.Contains(entry.Path);
+        }
+
+        OnPropertyChanged(nameof(SelectedRowCount));
+        SetStatus(_baseStatus);
+    }
+
+    /// <summary>
+    /// 橡皮筋框选的结果。additive=false 表示这一框取代原选区（不按 Ctrl 时的惯例）。
+    /// 矩形与可视行的相交判断在窗口侧做 —— 只有它知道每个行容器的实际位置。
+    /// </summary>
+    public void ApplyRowBandSelection(IEnumerable<string> paths, bool additive)
+    {
+        if (!additive)
+        {
+            _rowSelection.Clear();
+        }
+
+        foreach (var path in paths)
+        {
+            _rowSelection.Add(path);
+        }
+
+        _rowAnchorPath = paths.LastOrDefault() ?? _rowAnchorPath;
+        SyncRowSelection();
     }
 
     /// <summary>点目录条目：直接在面板里下钻进去，不再开一个资源管理器窗口。</summary>
@@ -523,12 +981,30 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return;
         }
 
+        SetFocus(entry);
         _previewBack.Push(_previewPath);
         ShowPreview(entry.Path);
     }
 
-    /// <summary>列表里双击某一项：目录 = 在资源管理器里打开它（单击已经会走进来了），文件 = 用默认程序打开。</summary>
+    /// <summary>
+    /// 列表里双击某一项：目录 = 在资源管理器里打开它（单击已经会走进来了），文件 = 用默认程序打开。
+    /// 目录必须走资源管理器而不是「系统默认程序」：两边双击同一个目录给出不同结果，用户会认为有一个是坏的。
+    /// </summary>
     public void OpenPreviewEntry(PreviewEntry entry) => OpenExternally(entry.Path, entry.Name);
+
+    /// <summary>在资源管理器里打开一个目录（失败要说清是谁打不开）。</summary>
+    private void OpenFolderInExplorer(string path, string displayName)
+    {
+        try
+        {
+            _launcher.OpenInExplorer(path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "在资源管理器中打开目录失败 {Path}", path);
+            OnNotice($"打不开「{displayName}」：{ex.Message}");
+        }
+    }
 
     /// <summary>双击桌面分类里的文件：交给系统关联程序打开，桌面上的文件本身一个都不动。</summary>
     public void OpenDesktopFile(DesktopFileItemViewModel item) => OpenExternally(item.Path, item.Name);
@@ -545,6 +1021,14 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     {
         if (path.Length == 0)
         {
+            return;
+        }
+
+        // 目录一律交给资源管理器：四个视图双击同一个目录必须给出同一个结果，
+        // 而「系统默认程序」那条路在部分机器上会把目录派给别的壳层。
+        if (Directory.Exists(path))
+        {
+            OpenFolderInExplorer(path, displayName);
             return;
         }
 
@@ -593,11 +1077,11 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// 请窗口为这一行弹改名输入框。改名要真动磁盘上的文件，所以输入框与校验都交给窗口，
     /// 视图模型只接最终结果（<see cref="RenameEntryAsync"/>）。
     /// </summary>
-    public void RequestEntryRename(PreviewEntry entry)
+    public void RequestEntryRename(EntryTarget target)
     {
-        if (entry.HasPath)
+        if (target.Path.Length > 0)
         {
-            EntryRenameRequested?.Invoke(this, entry);
+            EntryRenameRequested?.Invoke(this, target);
         }
     }
 
@@ -621,19 +1105,31 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     }
 
     /// <summary>请窗口二次确认「把这一行移到回收站」。真正的删除只在用户点头之后发生（<see cref="RecycleEntryAsync"/>）。</summary>
-    public void RequestEntryRecycle(PreviewEntry entry)
+    public void RequestEntryRecycle(EntryTarget target)
     {
-        if (entry.HasPath)
+        if (target.Path.Length > 0)
         {
-            EntryDeleteConfirmRequested?.Invoke(this, entry);
+            EntryDeleteConfirmRequested?.Invoke(this, target);
         }
     }
+
+    /// <summary>预览行那一侧的便捷入口。</summary>
+    public void RequestEntryRename(PreviewEntry entry) => RequestEntryRename(entry.ToTarget());
+
+    /// <summary>预览行那一侧的便捷入口。</summary>
+    public void RequestEntryRecycle(PreviewEntry entry) => RequestEntryRecycle(entry.ToTarget());
+
+    /// <summary>预览行那一侧的便捷入口（改名）。</summary>
+    public Task RenameEntryAsync(PreviewEntry entry, string newName) => RenameEntryAsync(entry.ToTarget(), newName);
+
+    /// <summary>预览行那一侧的便捷入口（移到回收站）。</summary>
+    public Task RecycleEntryAsync(PreviewEntry entry) => RecycleEntryAsync(entry.ToTarget());
 
     /// <summary>
     /// 提交改名：只改名字、绝不挪位置；重名或非法字符一律拒绝并说明原因。
     /// 改完之后收藏里那条旧路径要跟着换，右边正看着它的话窗格要收掉，列表重数一遍。
     /// </summary>
-    public async Task RenameEntryAsync(PreviewEntry entry, string newName)
+    public async Task RenameEntryAsync(EntryTarget entry, string newName)
     {
         string target;
         try
@@ -652,6 +1148,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return; // 名字一个字符都没变，什么都不做
         }
 
+        InvalidateFootprints();
         await _folders.ReplaceFavoriteAsync(entry.Path, target);
 
         if (FilePreview is not null && SamePath(FilePreview.FullPath, entry.Path))
@@ -659,7 +1156,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             DropContent();
         }
 
-        RebuildBrowse();
+        RefreshAfterDiskChange();
         OnNotice($"已改名为「{Path.GetFileName(target)}」", ToastKind.Success);
     }
 
@@ -667,7 +1164,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// 用户点头之后真的移到回收站（走 shell，所以从回收站还能捞回来）。
     /// 被取消就什么都不做；成功后把指向它的收藏一并撤掉，免得留下一条点开就报错的引用。
     /// </summary>
-    public async Task RecycleEntryAsync(PreviewEntry entry)
+    public async Task RecycleEntryAsync(EntryTarget entry)
     {
         bool removed;
         try
@@ -686,6 +1183,8 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return;
         }
 
+        InvalidateFootprints();
+
         if (_folders.IsFavorite(entry.Path))
         {
             await _folders.RemoveFavoriteAsync(entry.Path);
@@ -696,8 +1195,28 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             DropContent();
         }
 
-        RebuildBrowse();
+        RefreshAfterDiskChange();
         OnNotice($"已把「{entry.Name}」移到回收站，想恢复在回收站里右键「还原」", ToastKind.Success);
+    }
+
+    /// <summary>
+    /// 磁盘上的东西被这一行改掉之后，把看得见它的那些页都重算一遍
+    /// （浏览列表、收藏页、桌面分类；收藏引用与足迹缓存已在上游处理）。
+    /// </summary>
+    private void RefreshAfterDiskChange()
+    {
+        RebuildBrowse();
+
+        if (IsFavoritesView)
+        {
+            ApplyFilter();
+        }
+
+        if (IsDesktopView || IsSearchView)
+        {
+            _desktopFiles.Refresh();
+            RefreshView();
+        }
     }
 
     /// <summary>把当前这一层重新数一遍（改名/删除之后列表要立刻对上磁盘上的样子）。</summary>
@@ -708,8 +1227,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return;
         }
 
-        // 先清掉：ShowPreview 有一条「同路径就不重举」的快速路径，那是给返回用的，
-        // 而这里要的恰恰是重举。
+        // 显式重举：把「同层不重数」的快速路径与锚点都让开，这里要的恰恰是重数一遍。
+        _browseAnchorPath = string.Empty;
+        _browseCapped = false;
         PreviewItems.Clear();
         ShowPreview(_previewPath);
     }
@@ -775,8 +1295,18 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         _previewBack.Clear();
         _previewPath = string.Empty;
         PreviewItems.Clear();
+        _rowSelection.Clear();
+        _rowAnchorPath = string.Empty;
+        _browseSnapshot.Clear();
+        _browseRendered = 0;
+        _browseCapped = false;
+        _browseAnchorPath = string.Empty;
+        AttachBrowseWatcher(null);
         IsPreviewOpen = false;
         RaiseBrowseChanged();
+
+        // 退出浏览之后主区是卡片网格：焦点该落回把我带进来的那张，而不是从头来。
+        ApplyFocus(_previewCard);
     }
 
     /// <summary>
@@ -796,11 +1326,12 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
     private void ShowPreview(string path)
     {
-        // 从内容页退回「正在看的这一层」时不重新枚举：列表还挂在 ItemsSource 上，
+        // 从内容页退回「正在看的这一层」时不重新数盘：列表还挂在 ItemsSource 上，
         // 重新 Clear + Add 会把滚动条甩回顶部，用户读成「返回把我看的位置弄丢了」。
-        if (FilePreview is not null && PreviewItems.Count > 0 && SamePath(_previewPath, path))
+        // 改名/删除之后的重举会先清掉 PreviewItems，绕开这条快速路径。
+        if (PreviewItems.Count > 0 && _browseAnchorPath.Length == 0 && SamePath(_previewPath, path))
         {
-            FilePreview.ReleasePdf();
+            FilePreview?.ReleasePdf();
             FilePreview = null;
             PreviewTitle = $"{LeafName(path)}　·　{path}";
             IsPreviewOpen = true;
@@ -808,26 +1339,251 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return;
         }
 
-        PreviewItems.Clear();
+        // 换层就是换个语境：上一层的锚点带到新层会把滚动位置「锚」到一个不存在的路径上，
+        // 而内容窗格属于「上一眼」，离开原位就该收（PreviewFile 稍后会自己重新挂上）。
+        _browseAnchorPath = string.Empty;
+        FilePreview?.ReleasePdf();
         FilePreview = null;
+
         _previewPath = path;
         PreviewTitle = $"{LeafName(path)}　·　{path}";
+        IsPreviewOpen = true;
         RaiseBrowseChanged();
+
+        // 换层之后焦点由这一层重新决定：上一层那一行的焦点对象已经不在本页里了，
+        // 留着它只会让方向键「从不知道哪里起步」。
+        ApplyFocus(null);
+
+        // 渲染由 LoadBrowseSnapshot 负责：同步路径当场画完；现场路径先挂「正在数这一层」，
+        // 数完再画 —— 别在这里就判「空目录」，那会把等待中的列表闪成一句错话。
+        LoadBrowseSnapshot(path);
+    }
+
+    /// <summary>
+    /// 由窗口调用：开启「现场」能力 —— 监听这一层的磁盘变化自动重举、大目录转到后台线程数。
+    /// 单元测试里不开（没有消息循环、也不该真等 watcher），列表走同步路径，断言保持确定性。
+    /// </summary>
+    public void EnableLiveBrowse() => _browseLive = true;
+
+    /// <summary>是否降序（单测与自检用）。</summary>
+    public bool SortDescending => _sortDescending;
+
+    /// <summary>名称列的箭头：正在按名称排 = ↑/↓，否则一个不换行空格占位（表头不许跳动）。</summary>
+    public string SortNameArrow => ArrowFor(BrowseSortKey.Name);
+
+    /// <summary>类型列的箭头。</summary>
+    public string SortTypeArrow => ArrowFor(BrowseSortKey.Type);
+
+    /// <summary>大小列的箭头。</summary>
+    public string SortSizeArrow => ArrowFor(BrowseSortKey.Size);
+
+    /// <summary>修改时间列的箭头。</summary>
+    public string SortDateArrow => ArrowFor(BrowseSortKey.Date);
+
+    private string ArrowFor(BrowseSortKey key)
+        => key == _sortKey ? (_sortDescending ? "\u2193" : "\u2191") : "\u00A0";
+
+    /// <summary>
+    /// 点列头：换列按该列的「读法」给默认方向（大小/时间习惯从大到小，名称/类型 A→Z），
+    /// 再点同一列翻转。列表就地重排（保住在看的那一行），偏好写回 config，下次打开面板还是它。
+    /// </summary>
+    public async Task ToggleSortAsync(string? key)
+    {
+        if (!Enum.TryParse<BrowseSortKey>(key, out var parsed) || !IsPreviewOpen)
+        {
+            return;
+        }
+
+        if (parsed == _sortKey)
+        {
+            _sortDescending = !_sortDescending;
+        }
+        else
+        {
+            _sortKey = parsed;
+            _sortDescending = parsed is BrowseSortKey.Size or BrowseSortKey.Date;
+        }
+
+        NotifySortChanged();
+
+        var anchor = CurrentAnchorPath();
+        SortSnapshot();
+        _browseAnchorPath = anchor;
+        RenderBrowsePage(reset: true);
+
+        await SaveSortPreferenceAsync();
+    }
+
+    private void NotifySortChanged()
+    {
+        OnPropertyChanged(nameof(SortNameArrow));
+        OnPropertyChanged(nameof(SortTypeArrow));
+        OnPropertyChanged(nameof(SortSizeArrow));
+        OnPropertyChanged(nameof(SortDateArrow));
+    }
+
+    private async Task SaveSortPreferenceAsync()
+    {
+        _config.Current.BrowseSortBy = _sortKey.ToString();
+        _config.Current.BrowseSortDescending = _sortDescending;
 
         try
         {
-            var entries = EnumeratePreview(path).ToList();
-            var truncated = entries.Count > PreviewLimit;
+            await _config.SaveAsync();
+        }
+        catch (Exception ex)
+        {
+            // 偏好存不上不该打断浏览，下次打开回到旧设置而已。
+            _logger.LogDebug(ex, "保存浏览排序偏好失败");
+        }
+    }
 
-            foreach (var entry in entries.Take(PreviewLimit))
+    /// <summary>F5 / 刷新按钮：重数当前这一层，保住滚动位置与选中行。</summary>
+    [RelayCommand]
+    public void RefreshBrowse()
+    {
+        if (!IsPreviewOpen || _previewPath.Length == 0)
+        {
+            return;
+        }
+
+        _browseAnchorPath = CurrentAnchorPath();
+        LoadBrowseSnapshot(_previewPath);
+    }
+
+    /// <summary>滚到底时由窗口调用：把下一批行补上。没有更多就是空操作。</summary>
+    public void LoadMoreIfNeeded()
+    {
+        if (!IsPreviewOpen || _browseRendered >= _browseSnapshot.Count)
+        {
+            return;
+        }
+
+        _browseAnchorPath = CurrentAnchorPath();
+        RenderBrowsePage(reset: false);
+    }
+
+    /// <summary>保住「正在看的那一行」：内容窗格开着就锚内容，否则锚选中行。</summary>
+    private string CurrentAnchorPath()
+        => FilePreview?.FullPath ?? PreviewItems.FirstOrDefault(entry => entry.IsSelected && entry.HasPath)?.Path ?? string.Empty;
+
+    private void LoadBrowseSnapshot(string path)
+    {
+        var generation = ++_browseGeneration;
+        _browseSnapshot.Clear();
+        _browseCapped = false;
+
+        // 上一次加载还没回来的话先放行它：让等着的人往前走，别挂在一份已经作废的结果上。
+        _browsePending?.TrySetResult();
+        _browsePending = null;
+
+        if (!Directory.Exists(path))
+        {
+            _browseLoading = false;
+            RenderBrowsePage(reset: true);
+            AttachBrowseWatcher(null);
+            SetBrowseStatus();
+            return;
+        }
+
+        if (_browseLive)
+        {
+            // 大目录的列举不进 UI 线程：一次全量 stat 在机械盘上能到几百毫秒，
+            // 放这儿等于把面板的点击与动画按住。等待期间先给一行「正在数」，别说成「空目录」。
+            _browseLoading = true;
+            RenderBrowsePage(reset: true);
+
+            var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _browsePending = pending;
+
+            Task.Run(() =>
             {
-                PreviewItems.Add(entry);
+                var entries = BuildBrowseSnapshot(path);
+                _dispatcher.BeginInvoke(() =>
+                {
+                    if (generation != _browseGeneration)
+                    {
+                        return; // 人已经走了（切层/关闭），这一份作废
+                    }
+
+                    _browseSnapshot.AddRange(entries.Items);
+                    _browseCapped = entries.Capped;
+                    _browseLoading = false;
+                    SortSnapshot();
+                    RenderBrowsePage(reset: true);
+                    AttachBrowseWatcher(path);
+                    SetBrowseStatus();
+                    pending.TrySetResult();
+                });
+            });
+            return;
+        }
+
+        var sync = BuildBrowseSnapshot(path);
+        _browseSnapshot.AddRange(sync.Items);
+        _browseCapped = sync.Capped;
+        _browseLoading = false;
+        SortSnapshot();
+        RenderBrowsePage(reset: true);
+        AttachBrowseWatcher(path);
+        SetBrowseStatus();
+    }
+
+    /// <summary>
+    /// 等当前这一层的列表加载走完。开了「现场」能力后大目录是后台线程数的，
+    /// 界面先画骨架、结果异步回来 —— 自检和调用方要用它替代「拍脑袋等 150ms」。
+    /// </summary>
+    public Task WaitForBrowsePageAsync() => Volatile.Read(ref _browsePending)?.Task ?? Task.CompletedTask;
+
+    private (List<BrowseEntry> Items, bool Capped) BuildBrowseSnapshot(string path)
+    {
+        var items = new List<BrowseEntry>();
+
+        try
+        {
+            foreach (var directory in Directory.EnumerateDirectories(path))
+            {
+                if (items.Count >= BrowseSnapshotCap)
+                {
+                    return (items, true);
+                }
+
+                DateTime modified;
+                try
+                {
+                    modified = Directory.GetLastWriteTime(directory);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "读取目录时间失败 {Path}", directory);
+                    modified = DateTime.MinValue;
+                }
+
+                items.Add(new BrowseEntry(directory, new DirectoryInfo(directory).Name, true, 0, modified));
             }
 
-            // 截断必须说出来：只画 50 条而不告诉后面还有，用户会认为这个目录就只有 50 项。
-            if (truncated)
+            foreach (var file in Directory.EnumerateFiles(path))
             {
-                PreviewItems.Add(new PreviewEntry(this, "仅显示前 50 项 · 双击卡片可在资源管理器里看全部", string.Empty, false));
+                if (items.Count >= BrowseSnapshotCap)
+                {
+                    return (items, true);
+                }
+
+                long size = 0;
+                var modified = DateTime.MinValue;
+                try
+                {
+                    var info = new FileInfo(file);
+                    size = info.Length;
+                    modified = info.LastWriteTime;
+                }
+                catch (Exception ex)
+                {
+                    // 单个条目 stat 不了（重解析环、瞬时占用）不影响整层：列出来，值留空。
+                    _logger.LogDebug(ex, "读取预览条目大小失败 {Path}", file);
+                }
+
+                items.Add(new BrowseEntry(file, Path.GetFileName(file), false, size, modified));
             }
         }
         catch (Exception ex)
@@ -836,13 +1592,201 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             OnNotice($"读不到该目录：{ex.Message}");
         }
 
-        if (PreviewItems.Count == 0)
+        return (items, false);
+    }
+
+    private void SortSnapshot()
+        => _browseSnapshot.Sort(BrowseSorter.ComparerFor<BrowseEntry>(
+            _sortKey,
+            _sortDescending,
+            entry => new BrowseSorter.Item(entry.Name, Path.GetExtension(entry.Name), entry.IsDirectory, entry.SizeBytes, entry.Modified)));
+
+    private void RenderBrowsePage(bool reset)
+    {
+        // 后台列举回来时，「正在看内容的那个文件」就是该锚住的行 —— PreviewFile 是先把内容挂上、
+        // 再等这一层的行回来的，不兜这一下的话高亮会丢。
+        var anchor = _browseAnchorPath.Length > 0
+            ? _browseAnchorPath
+            : FilePreview?.FullPath ?? string.Empty;
+        _browseAnchorPath = string.Empty;
+
+        if (reset)
         {
-            PreviewItems.Add(new PreviewEntry(this, "（空目录或无读取权限）", string.Empty, false));
+            PreviewItems.Clear();
+            _rowSelection.Clear();
+            _rowAnchorPath = string.Empty;
+            _browseRendered = 0;
+        }
+        else if (PreviewItems.Count > _browseRendered)
+        {
+            // 末尾那条提示行只是「还剩多少」的说明，补批之前先摘掉，补完再按新余量重挂。
+            PreviewItems.RemoveAt(PreviewItems.Count - 1);
         }
 
-        IsPreviewOpen = true;
-        RaiseBrowseChanged();
+        var from = _browseRendered;
+        var take = Math.Min(BrowsePageSize, _browseSnapshot.Count - from);
+        for (var index = from; index < from + take; index++)
+        {
+            PreviewItems.Add(CreatePreviewRow(_browseSnapshot[index]));
+            _browseRendered++;
+        }
+
+        if (_browseLoading)
+        {
+            // 现场路径还在数盘：给一行「正在数」，这时候说「空目录」是句错话。
+            PreviewItems.Add(new PreviewEntry(this, "正在数这一层…", string.Empty, false));
+            return;
+        }
+
+        if (_browseRendered == 0)
+        {
+            PreviewItems.Add(new PreviewEntry(this, "（空目录或无读取权限）", string.Empty, false));
+            return;
+        }
+
+        AppendBrowseTailHint();
+
+        if (anchor.Length > 0)
+        {
+            MarkSelected(anchor);
+
+            if (reset)
+            {
+                // 让窗口把这一行滚回视野：重举把行对象全换了，WPF 自己不知道该停在哪。
+                if (PreviewItems.Any(entry => entry.HasPath && SamePath(entry.Path, anchor)))
+                {
+                    ScrollToEntryRequested?.Invoke(this, anchor);
+                }
+            }
+            else
+            {
+                _browseAnchorPath = anchor;
+            }
+        }
+
+        RestoreFocusByPath();
+    }
+
+    /// <summary>
+    /// 末尾那句「还有多少」必须说：只画一批而不告诉后面还有，用户会认为这个目录就这么大。
+    /// </summary>
+    private void AppendBrowseTailHint()
+    {
+        if (_browseCapped)
+        {
+            PreviewItems.Add(new PreviewEntry(
+                this, $"这一层超过 {BrowseSnapshotCap} 项，只数到这里 · 双击卡片可在资源管理器里看全部", string.Empty, false));
+        }
+        else if (_browseRendered < _browseSnapshot.Count)
+        {
+            PreviewItems.Add(new PreviewEntry(
+                this, $"还有 {_browseSnapshot.Count - _browseRendered} 项 · 往下滚动继续加载", string.Empty, false));
+        }
+    }
+
+    private PreviewEntry CreatePreviewRow(BrowseEntry entry)
+        => new(this, entry.Name, entry.Path, entry.IsDirectory, entry.SizeBytes, entry.Modified)
+        {
+            // 预览行也能收藏，建行时就把现值带上，星星不许先画成空心再等异步回填。
+            IsFavorite = _folders.IsFavorite(entry.Path),
+            SizeText = entry.IsDirectory ? string.Empty : FileText.Size(entry.SizeBytes),
+            ModifiedText = entry.Modified == DateTime.MinValue ? string.Empty : FileText.Modified(entry.Modified),
+        };
+
+    private void SetBrowseStatus()
+    {
+        if (IsPreviewOpen || _previewPath.Length > 0)
+        {
+            SetStatus(_browseSnapshot.Count switch
+            {
+                var count when count == 0 => "这一层是空的",
+                var count when _browseCapped => $"这一层至少 {count} 项（已数到上限）",
+                var count when count > BrowsePageSize => $"{count} 项 · 已列 {Math.Min(_browseRendered, count)}，往下滚动看剩下的",
+                var count => $"{count} 项",
+            });
+        }
+    }
+
+    // ==================== 磁盘变化监听 ====================
+
+    /// <summary>
+    /// 换层/退出时重挂 watcher。挂不上（网络盘、权限）不报错：
+    /// 有 <see cref="_browseLive"/> 时退到 60 秒兜底重举，手动 F5 永远可用。
+    /// </summary>
+    private void AttachBrowseWatcher(string? path)
+    {
+        _browseWatcher?.Dispose();
+        _browseWatcher = null;
+        _browseDebounce?.Stop();
+
+        if (path is null)
+        {
+            _browseFallback?.Stop();
+            return;
+        }
+
+        try
+        {
+            _browseWatcher = new FileSystemWatcher(path)
+            {
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            };
+            _browseWatcher.Changed += OnBrowseDiskChanged;
+            _browseWatcher.Created += OnBrowseDiskChanged;
+            _browseWatcher.Deleted += OnBrowseDiskChanged;
+            _browseWatcher.Renamed += OnBrowseDiskChanged;
+            _browseWatcher.Error += (_, _) => EnableBrowseFallback();
+            _browseWatcher.EnableRaisingEvents = true;
+            _browseFallback?.Stop();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "浏览列表监听失败，退到定时兜底 {Path}", path);
+            _browseWatcher = null;
+            EnableBrowseFallback();
+        }
+    }
+
+    private void OnBrowseDiskChanged(object sender, FileSystemEventArgs e)
+    {
+        if (!_browseLive)
+        {
+            return;
+        }
+
+        // watcher 回调在线程池线程上，防抖计时器必须回 UI 线程起。
+        _dispatcher.BeginInvoke(() =>
+        {
+            _browseDebounce ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(BrowseRefreshDebounceMs) };
+            _browseDebounce.Stop();
+            _browseDebounce.Tick -= OnBrowseDebounceTick;
+            _browseDebounce.Tick += OnBrowseDebounceTick;
+            _browseDebounce.Start();
+        });
+    }
+
+    private void OnBrowseDebounceTick(object? sender, EventArgs e)
+    {
+        _browseDebounce?.Stop();
+
+        // 别的程序在动盘上的文件时，用户可能正翻到第 300 行：锚点保住，重举不甩位置。
+        if (IsPreviewOpen && _previewPath.Length > 0 && !IsCreateEntryOpen)
+        {
+            _browseAnchorPath = CurrentAnchorPath();
+            LoadBrowseSnapshot(_previewPath);
+        }
+    }
+
+    private void EnableBrowseFallback()
+    {
+        if (_browseFallback is null)
+        {
+            _browseFallback = new DispatcherTimer { Interval = BrowsePollInterval };
+            _browseFallback.Tick += (_, _) => RefreshBrowse();
+        }
+
+        _browseFallback.Stop();
+        _browseFallback.Start();
     }
 
     /// <summary>面包屑那几项都是从 <see cref="_previewPath"/> 与栈里现算的，改了要一起通知。</summary>
@@ -956,6 +1900,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         PreviewTitle = $"{Path.GetFileName(path)}　·　{directory}";
         RaiseBrowseChanged();
         MarkSelected(path);
+
+        // 焦点落到刚看的那一行（如果它就在当前列表里）：接着按方向键应该从它继续走。
+        SetFocus(FindByPath(PreviewItems, path) ?? _focused);
 
         preview.SetSiblings(SiblingFilesOf(directory));
         preview.Load();
@@ -1178,8 +2125,14 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
     }
 
+    /// <summary>上一次移除那几条引用的原样快照，供「撤销」放回去（只保一次，且只在本次会话内）。</summary>
+    private IReadOnlyList<FolderItem>? _removedSnapshot;
+
     private async Task RemoveAsync(IReadOnlyList<FolderCardViewModel> targets)
     {
+        // 先抓快照：删完 _all 就没了，撤销要的是「原来那个 Id、原来那个位置」。
+        _removedSnapshot = _all.Where(item => targets.Any(card => card.Id == item.Id)).ToList();
+
         foreach (var card in targets)
         {
             if (!await GuardAsync("移除失败", () => _folders.RemoveAsync(card.Id)))
@@ -1189,6 +2142,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
 
         ClearSelection();
+        InvalidateFootprints();
         RebuildSource();
         RebuildTabs();
         ApplyFilter();
@@ -1198,7 +2152,34 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             targets.Count == 1
                 ? $"已移除「{targets[0].DisplayName}」，磁盘上的目录没有改动"
                 : $"已移除 {targets.Count} 条引用，磁盘上的目录一个都没动",
-            ToastKind.Success);
+            ToastKind.Success,
+            "撤销",
+            () => _ = RestoreRemovedAsync());
+    }
+
+    /// <summary>
+    /// 撤销刚才那批移除：把快照按原 Id、原顺序放回配置。
+    /// 一次点掉十几条引用本来是「看着删掉了、想回来要一个个重加」的操作，这条把它变回可逆。
+    /// </summary>
+    private async Task RestoreRemovedAsync()
+    {
+        var snapshot = _removedSnapshot;
+
+        if (snapshot is null || snapshot.Count == 0)
+        {
+            return;
+        }
+
+        _removedSnapshot = null;
+
+        await _folders.RestoreAsync(snapshot);
+
+        RebuildSource();
+        RebuildTabs();
+        ApplyFilter();
+        await LoadCountsAsync();
+
+        OnNotice($"已撤销：{snapshot.Count} 条引用回到了原来的位置", ToastKind.Success);
     }
 
     /// <summary>
@@ -1222,6 +2203,11 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
     }
 
+    /// <summary>浏览列表里被选中的那些行（按路径记，重画之后还能认得回来）。</summary>
+    private readonly HashSet<string> _rowSelection = new(StringComparer.OrdinalIgnoreCase);
+
+    private string _rowAnchorPath = string.Empty;
+
     private readonly HashSet<string> _selection = new(StringComparer.OrdinalIgnoreCase);
     private string? _selectionAnchorId;
     private string _baseStatus = string.Empty;
@@ -1238,6 +2224,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// </summary>
     public void HandleCardClick(FolderCardViewModel card, bool ctrl, bool shift)
     {
+        SetFocus(card);
         if (shift && _selectionAnchorId is not null)
         {
             var ids = Cards.Select(entry => entry.Id).ToList();
@@ -1273,9 +2260,12 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return;
         }
 
+        // 单击就是「以这张为准」：无条件收成单选，与资源管理器一致。
+        // 批量处理走的是右键那一下 —— 右键不经过这里（模板挂在 LeftButtonUp 上），所以选区不会被踩没。
         _selection.Clear();
         _selection.Add(card.Id);
         _selectionAnchorId = card.Id;
+
         SyncSelection();
         PreviewCard(card);
     }
@@ -1293,6 +2283,14 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         _selectionAnchorId = Cards.LastOrDefault()?.Id;
         SyncSelection();
     }
+
+    /// <summary>
+    /// 接下来右键会作用在几条上（自检与单测用它确认「批量」真的是批量）。
+    /// </summary>
+    public int BatchTargetCount => CurrentTargets().Count;
+
+    /// <summary>右键那一下会作用到的真实路径（自检用它确认「批量」没漏条）。</summary>
+    public IReadOnlyList<string> BatchTargetPaths() => [.. CurrentTargets().Select(card => card.RealPath)];
 
     /// <summary>清掉选中状态（Esc、批量操作之后）。</summary>
     public void ClearSelection()
@@ -1319,7 +2317,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         _baseStatus = text;
         StatusText = _selection.Count > 0
             ? $"{text} · 已选 {_selection.Count} 张，右键可批量处理"
-            : text;
+            : _rowSelection.Count > 1
+                ? $"{text} · 已选 {_rowSelection.Count} 项，可一次拖出或右键批量处理"
+                : text;
     }
 
     /// <summary>
@@ -1330,6 +2330,12 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// 拖到 DeskMate 外面（微信、浏览器上传区、资源管理器）时要带走的路径：
     /// 选中了多张就一次拖多个，否则只拖按住的那一张。
     /// </summary>
+    /// <summary>拖到分组 Tab 上要一起带走的那批卡片 id：多选后拖其中一张 = 整批一起归组。</summary>
+    public string[] DragIdsFor(FolderCardViewModel card)
+        => _selection.Count > 1 && _selection.Contains(card.Id)
+            ? Cards.Where(entry => _selection.Contains(entry.Id)).Select(entry => entry.Id).ToArray()
+            : [card.Id];
+
     public IReadOnlyList<string> DragPathsFor(FolderCardViewModel card)
         => _selection.Count > 1 && _selection.Contains(card.Id)
             ? Cards.Where(entry => _selection.Contains(entry.Id)).Select(entry => entry.RealPath).ToArray()
@@ -1405,6 +2411,67 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         if (targets.Count > 1)
         {
             OnNotice($"已把 {targets.Count} 个文件夹归到「{tab.Name}」", ToastKind.Success);
+        }
+    }
+
+    /// <summary>
+    /// 拖到分组 Tab 上 = 把拖着的这批卡片归进那个组。
+    /// 「全部 / ★收藏 / 桌面分类」不是组，落上去只会让人以为归成功了其实没有，所以挡下来并说明原因。
+    /// </summary>
+    public async Task MoveToGroupAsync(string tabId, IReadOnlyList<string> cardIds)
+    {
+        if (cardIds.Count == 0)
+        {
+            return;
+        }
+
+        var isBuiltInView = tabId is AllTabId or FavoritesTabId || DesktopFileRules.IsCategoryTab(tabId);
+
+        if (isBuiltInView)
+        {
+            OnNotice("「全部」「★ 收藏」和桌面分类不是一个组，卡片不能拖进去。要归组请拖到某个分组上，或拖到「未分组」移出。", ToastKind.Info);
+            return;
+        }
+
+        var groupId = tabId == UngroupedTabId ? null : tabId;
+        var targets = Cards.Where(card => cardIds.Contains(card.Id)).ToList();
+
+        if (targets.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var card in targets)
+        {
+            if (!await GuardAsync("归组失败", () => _folders.UpdateGroupAsync(card.Id, groupId)))
+            {
+                return;
+            }
+
+            card.GroupId = groupId;
+        }
+
+        RebuildTabs();
+        ApplyFilter();
+
+        // 落完就切到目标 Tab：所见即所得。留在原来那一组的话，卡片刚从屏幕上消失，
+        // 用户读成「拖没了」而不是「拖进去了」。
+        SelectedTabId = tabId;
+
+        var name = _folders.GetGroups().FirstOrDefault(group => group.Id == groupId)?.Name;
+        OnNotice(
+            groupId is null
+                ? $"已把 {targets.Count} 个文件夹移出分组（磁盘上的位置没变）"
+                : $"已把 {targets.Count} 个文件夹归到「{name}」（磁盘上的位置没变）",
+            ToastKind.Success);
+    }
+
+    /// <summary>拖拽悬停时把落点那枚 Tab 亮起来；传 null 表示全部熄掉。</summary>
+    public void HighlightDropTab(string? tabId)
+    {
+        foreach (var tab in Tabs)
+        {
+            tab.IsDropTarget = tab.Id == tabId;
         }
     }
 
@@ -1742,6 +2809,8 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         // 搜完清空时状态栏不能留着「搜索「xxx」：N 个文件夹 · M 个文件」那句 —— 它说的已经不是屏幕上这些了。
         SetStatus($"当前视图 {Cards.Count} 个文件夹");
+        RestoreFocusByPath();
+        WarmMissingCounts();
     }
 
     /// <summary>桌面文件卡片：建出来就带上收藏状态，星星不能先画成空心再等异步回填。</summary>
@@ -1757,6 +2826,14 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         // 星星的初值必须一次到位：先画成空心再等异步回填，用户会以为刚收藏的东西没生效。
         card.IsFavorite = _folders.IsFavorite(item.RealPath);
+
+        // 足迹问过的目录立即回填：桌面监听一刷新就重建全部卡片，
+        // 不回填的话已经数过的卡片会集体退回「统计中…」，看着像工具没在动。
+        if (_footprints.TryGetValue(item.RealPath, out var footprint))
+        {
+            ApplyFootprint(card, footprint);
+        }
+
         return card;
     }
 
@@ -1804,6 +2881,8 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
 
         SetStatus(IsSearchEmpty ? $"{summary} · 没找到" : summary);
+        RestoreFocusByPath();
+        WarmMissingCounts();
     }
 
     /// <summary>当前分类里一个文件都没有（空面板要有句话，不然看着像坏了）。</summary>
@@ -1845,12 +2924,26 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         SetStatus($"{DesktopFileRules.DisplayName(category.Value)} {DesktopFiles.Count} 个 · 桌面共 {files.Count} 个文件");
         IsDesktopEmpty = DesktopFiles.Count == 0;
+        RestoreFocusByPath();
     }
 
     // 面板、启动台、全局搜索用同一套匹配规则：在启动台能打「jsq」找到计算器，换个窗口就打不开，
     // 用户只会认为这个搜索坏了。
     private static bool Matches(FolderItem item, string key)
         => PinyinMatcher.Score(item.DisplayName, key, item.RealPath) > PinyinMatcher.NoMatch;
+
+    /// <summary>
+    /// 这一轮重画里还有没数过的卡片就补一轮统计。
+    /// 走 <see cref="LoadCountsAsync"/> 那条串行队列（一次一张），不并发扫盘 —— 桌面监听每隔几秒
+    /// 就会重画一次，并发版等于把盘反复碾过去。
+    /// </summary>
+    private void WarmMissingCounts()
+    {
+        if (Cards.Any(card => card.IsCountLoading) || SearchHits.OfType<FolderCardViewModel>().Any(card => card.IsCountLoading))
+        {
+            _ = LoadCountsAsync();
+        }
+    }
 
     private async Task LoadCountsAsync()
     {
@@ -1874,9 +2967,18 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
     private async Task LoadCountForAsync(FolderCardViewModel card)
     {
+        if (_footprints.TryGetValue(card.RealPath, out var cached))
+        {
+            ApplyFootprint(card, cached);
+            return;
+        }
+
         try
         {
-            card.FileCount = await _folders.CountFilesAsync(card.RealPath);
+            FootprintProbes++;
+            var footprint = await _folders.MeasureAsync(card.RealPath, wantSize: false);
+            _footprints[card.RealPath] = footprint;
+            ApplyFootprint(card, footprint);
         }
         catch (Exception ex)
         {
@@ -1886,65 +2988,81 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
     }
 
-    // 预览只读列举，且限量 50 条：既满足需求，也避免大目录把 UI 卡住。
-    // 多取一条只为了知道「后面还有没有」，好决定要不要挂那行截断提示。
-    private IEnumerable<PreviewEntry> EnumeratePreview(string path)
+    private static void ApplyFootprint(FolderCardViewModel card, FolderFootprint footprint)
     {
-        if (!Directory.Exists(path))
+        card.FileCount = footprint.FileCount;
+        card.ModifiedText = footprint.HasModified ? FileText.Modified(footprint.Modified) : string.Empty;
+
+        if (footprint.SizeMeasured && footprint.FileCount < FolderFootprint.FileCountCap)
         {
-            yield break;
-        }
-
-        var probe = PreviewLimit + 1;
-        var taken = 0;
-        foreach (var directory in Directory.EnumerateDirectories(path))
-        {
-            if (taken >= probe)
-            {
-                yield break;
-            }
-
-            // 预览行也能收藏，所以建行之时要把当前收藏状态带进来，不然星星一律显示成空心。
-            yield return new PreviewEntry(this, new DirectoryInfo(directory).Name, directory, true)
-            {
-                IsFavorite = _folders.IsFavorite(directory),
-                ModifiedText = FileText.Modified(Directory.GetLastWriteTime(directory)),
-            };
-            taken++;
-        }
-
-        foreach (var file in Directory.EnumerateFiles(path))
-        {
-            if (taken >= probe)
-            {
-                yield break;
-            }
-
-            // 大小与日期顺手取：列表现在摆在主区，得像资源管理器那样看得出「哪个是刚改过的」。
-            // 一次枚举最多 50 条，多一个 stat 不算成本；取不到就留空，不影响这一行列出来。
-            var size = string.Empty;
-            var modified = string.Empty;
-
-            try
-            {
-                var info = new FileInfo(file);
-                size = FileText.Size(info.Length);
-                modified = FileText.Modified(info.LastWriteTime);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "读取预览条目大小失败 {Path}", file);
-            }
-
-            yield return new PreviewEntry(this, Path.GetFileName(file), file, false)
-            {
-                IsFavorite = _folders.IsFavorite(file),
-                SizeText = size,
-                ModifiedText = modified,
-            };
-            taken++;
+            card.SizeText = FileText.Size(footprint.SizeBytes);
         }
     }
+
+    /// <summary>
+    /// 右键「计算总大小」：整棵树称重。默认不算是因为它要对每个文件 stat 一次，
+    /// 首屏十几张卡并发扫盘就是「面板一打开就卡」；用户问了才算，算完记住。
+    /// </summary>
+    public async Task MeasureSizeAsync(string path, FolderCardViewModel card)
+    {
+        card.IsSizeLoading = true;
+
+        try
+        {
+            var footprint = await MeasureAsync(path);
+            card.SizeText = footprint.SizeMeasured
+                ? FileText.Size(footprint.SizeBytes)
+                : $"超过 {FileText.Size(FolderFootprint.SizeCap)}，没数完";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "计算总大小失败 {Path}", path);
+            card.SizeText = "读不到";
+        }
+        finally
+        {
+            card.IsSizeLoading = false;
+        }
+    }
+
+    /// <summary>收藏页的「计算总大小」：同一份缓存，结果写进那一行副标题。</summary>
+    public async Task MeasureSizeAsync(string path, FavoriteCardViewModel card)
+    {
+        var previous = card.MetaText;
+        card.MetaText = "正在称重…";
+
+        try
+        {
+            var footprint = await MeasureAsync(path);
+            var weight = footprint.SizeMeasured ? FileText.Size(footprint.SizeBytes) : $"超过 {FileText.Size(FolderFootprint.SizeCap)}";
+            var count = footprint.FileCount >= FolderFootprint.FileCountCap ? "10000+ 个文件" : $"{footprint.FileCount} 个文件";
+
+            card.MetaText = $"{weight} · {count}";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "计算总大小失败 {Path}", path);
+            card.MetaText = previous.Length > 0 ? previous : "读不到";
+        }
+    }
+
+    private async Task<FolderFootprint> MeasureAsync(string path)
+    {
+        if (_footprints.TryGetValue(path, out var cached) && cached.SizeMeasured)
+        {
+            return cached;
+        }
+
+        FootprintProbes++;
+        var footprint = await _folders.MeasureAsync(path, wantSize: true);
+
+        // 称过的结果并把旧的「只数过个数」那份换掉：下次同一目录直接命中。
+        _footprints[path] = footprint;
+        return footprint;
+    }
+
+    /// <summary>磁盘上的东西动了：足迹缓存整份作废（改哪一层数不清，宁可重算也别报旧数）。</summary>
+    private void InvalidateFootprints() => _footprints.Clear();
 
     // ==================== 收藏 ====================
 
@@ -1982,6 +3100,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         SetStatus(IsFavoritesEmpty
             ? "还没有收藏 · 点文件夹卡片右下角的 ☆ 收进来"
             : $"收藏 {FavoriteCards.Count} 项");
+        RestoreFocusByPath();
 
         _ = LoadFavoriteDetailsAsync();
     }
@@ -2032,13 +3151,10 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     {
         if (Directory.Exists(card.FullPath))
         {
-            var count = FolderService.CountFiles(card.FullPath, _logger);
-            var meta = count >= FolderService.FileCountCap
-                ? "10000+"
-                : count == 0
-                    ? "空"
-                    : $"{count} 个文件";
-            return (true, true, string.Empty, meta);
+            // 收藏页可以一次摆几十条，逐条递归数文件就是打开这一页先卡一下。
+            // 默认只报「多大的一坨」里最便宜的那一半：日期；要数字与大小，右键「计算总大小」。
+            var modified = Directory.GetLastWriteTime(card.FullPath);
+            return (true, true, string.Empty, $"目录 · {FileText.Modified(modified)} · 右键算大小");
         }
 
         if (File.Exists(card.FullPath))
@@ -2064,7 +3180,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// </summary>
     public async Task ToggleFavoriteAsync(string path, string displayName)
     {
-        // 预览列表末尾那行「仅显示前 50 项」是提示不是路径，星星按钮已经藏了，这里再兜一道。
+        // 预览列表末尾「还有 N 项 / 超过上限」那类提示行不是路径，星星按钮已经藏了，这里再兜一道。
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
@@ -2222,6 +3338,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// </summary>
     public void PreviewFavorite(FavoriteCardViewModel card)
     {
+        SetFocus(card);
         // 自己判断是不是目录，不用卡片上那个 IsDirectory：详情是后台慢慢填的，
         // 收藏刚点亮就点卡片的话它还是 false，目录会被当成文件、预览到上一层去。
         if (Directory.Exists(card.FullPath))
@@ -2443,6 +3560,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         try
         {
             created = await _folders.CreateEntryAsync(directory, name, option);
+
+            // 新建改了父目录的内容与个数：缓存里那份「N 个文件」当场作废。
+            InvalidateFootprints();
         }
         catch (Exception ex)
         {
@@ -2467,8 +3587,22 @@ public sealed partial class FolderManagerViewModel : ObservableObject
                 ? option.Label
                 : NewEntryRules.Classify(name) == NewEntryKind.Folder ? "文件夹" : "文件";
 
+        // 建完就走进这一层并把新条目落焦点：下一个动作几乎总是「改个名」，
+        // 让用户再点一次它才能 F2，等于把这条最顺手的路径扔了。
+        var landedOnNewEntry = false;
+
+        if (Directory.Exists(directory) && Path.Exists(created))
+        {
+            _previewBack.Clear();
+            ShowPreview(directory);
+            SetFocus(FindByPath(PreviewItems, created));
+            landedOnNewEntry = _focused is not null;
+        }
+
         OnNotice(
-            $"已新建{label}「{name}」",
+            landedOnNewEntry
+                ? $"已新建{label}「{name}」· 已选中，按 F2 可改名"
+                : $"已新建{label}「{name}」",
             ToastKind.Success,
             "打开",
             () =>
@@ -2491,6 +3625,16 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         Action? action = null)
         => UserNotice?.Invoke(this, new NoticeEventArgs(message, kind, actionLabel, action));
 }
+
+/// <summary>
+/// 行级「重命名 / 移到回收站」作用在谁身上。
+/// 浏览列表、收藏页、桌面分类、搜索结果里的行都换算成它 —— 用户批准的口径是
+/// 「任何看得见的路径行」，只在浏览列表那一页给这两个命令会让人搞不清「换个入口就没了」。
+/// </summary>
+/// <param name="Path">真实路径。</param>
+/// <param name="Name">显示名（提示语与确认框里要说清是谁）。</param>
+/// <param name="IsDirectory">目录还是文件：确认框要额外提醒目录会连里面的东西一起进回收站。</param>
+public sealed record EntryTarget(string Path, string Name, bool IsDirectory);
 
 /// <summary>请窗口确认的「删掉这个分组」。</summary>
 /// <param name="GroupId">分组 Id。</param>

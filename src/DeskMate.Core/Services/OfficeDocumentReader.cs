@@ -34,7 +34,8 @@ public static class OfficeDocumentReader
 
     private static IReadOnlyList<MarkdownBlock> Read(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        // 同 ArchiveLister：读 Office 包时也要允许外面改名/删除，否则预览进行中按 F2 会报「文件被占用」。
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
 
         return Path.GetExtension(path).ToLowerInvariant() switch

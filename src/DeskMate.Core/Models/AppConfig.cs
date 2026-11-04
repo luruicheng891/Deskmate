@@ -99,4 +99,13 @@ public class AppConfig
     /// 收藏不复制、不移动、不改名任何文件，取消收藏也只是把这一行从配置里去掉。
     /// </summary>
     public List<string> Favorites { get; set; } = new();
+
+    /// <summary>
+    /// 浏览列表的排序列（Name / Type / Size / Date，大小写不敏感，坏值回落 Name）。
+    /// 是全局偏好：在所有文件夹里都按同一列排，不用每层重选一遍。
+    /// </summary>
+    public string BrowseSortBy { get; set; } = "Name";
+
+    /// <summary>浏览列表是否降序。</summary>
+    public bool BrowseSortDescending { get; set; } = false;
 }

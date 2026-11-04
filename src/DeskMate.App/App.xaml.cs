@@ -92,8 +92,19 @@ public partial class App : Application
         Log.Information("DeskMate 启动完成，数据目录 {Root}", WellKnownPaths.Root);
     }
 
+    /// <summary>
+    /// 用户点「退出」那一刻的时间戳（<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>），0 = 不是从托盘菜单退的。
+    /// 退出卡顿要分得清是哪一段：点退出 → WPF 关窗口 → OnExit → 进程拆除，各自花了多久。
+    /// </summary>
+    internal static long ExitRequestedAt;
+
     protected override void OnExit(ExitEventArgs e)
     {
+        var exitWatch = System.Diagnostics.Stopwatch.StartNew();
+        var lead = ExitRequestedAt == 0 ? (TimeSpan?)null : System.Diagnostics.Stopwatch.GetElapsedTime(ExitRequestedAt);
+        var steps = new List<string>();
+        void Step(string name) => steps.Add($"{name} {exitWatch.Elapsed.TotalMilliseconds:F0}ms");
+
         if (_container is not null)
         {
             // 逆序收尾：先收起界面并解绑事件，再释放钩子，最后让容器处置 STA 线程与统计落盘。
@@ -105,16 +116,48 @@ public partial class App : Application
             {
                 Log.Error(ex, "退出时收起界面失败");
             }
+
+            Step("界面收尾");
         }
 
         HotkeyManager.Detach();
+        Step("热键摘除");
         Log.Information("DeskMate 退出");
 
         _container?.Dispose();
+        Step("容器释放");
+
+        // 步骤数字是「从 OnExit 进入起的累计毫秒」，相邻两项相减就是该步耗时。
+        Log.Information(
+            "退出耗时：点退出到 OnExit 进入 {Lead}；OnExit 内累计 {Total:F0} ms（{Steps}）",
+            lead is { } l ? $"{l.TotalMilliseconds:F0} ms" : "未知（非托盘菜单退出）",
+            exitWatch.Elapsed.TotalMilliseconds,
+            string.Join("，", steps));
+
         Log.CloseAndFlush();
         _instanceLock?.Dispose();
 
+        // OnExit 之后还有进程拆除（托盘图标、原生窗口、非托管资源），日志此时已关，
+        // 这一段另写一行到单独的小文件里，用来判断「卡的是 OnExit 之前、之内、还是之后」。
+        var requestedAt = ExitRequestedAt;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => WriteProcessExitTiming(requestedAt, exitWatch);
+
         base.OnExit(e);
+    }
+
+    private static void WriteProcessExitTiming(long requestedAt, System.Diagnostics.Stopwatch exitWatch)
+    {
+        try
+        {
+            var sinceRequest = requestedAt == 0 ? "未知" : $"{System.Diagnostics.Stopwatch.GetElapsedTime(requestedAt).TotalMilliseconds:F0} ms";
+            File.WriteAllText(
+                Path.Combine(WellKnownPaths.LogsFolder, "last-exit-timing.txt"),
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}  进程退出事件触发：距点退出 {sinceRequest}；OnExit 结束后又过了 {exitWatch.Elapsed.TotalMilliseconds:F0} ms（含 OnExit 本身）{Environment.NewLine}");
+        }
+        catch
+        {
+            // 退出的最后一步，写不进去就算了，不能因此让进程卡住或抛异常。
+        }
     }
 
     /// <summary>
@@ -179,6 +222,9 @@ public partial class App : Application
         await VerifyFavoriteStarsAndPreviewAsync(folders, folderVm);
         await VerifyPanelSearchAsync(folders, folderVm);
         await VerifyBrowseAndContentAsync(folders, folderVm);
+        await VerifyKeyboardFocusAsync(folders, folderVm);
+        VerifyTabDropTargets(folders, folderVm);
+        await VerifyCardFootprintAsync(folders, folderVm);
         await VerifyFileContentAsync(folders, folderVm, services.GetRequiredService<FilePreviewWindow>());
         await VerifyPreviewFollowsContextAsync(folders, folderVm);
         await VerifyCardColumnsAsync(folders, folderVm);
@@ -744,6 +790,7 @@ public partial class App : Application
         {
             viewModel.SelectTab(viewModel.Tabs[0]);
             viewModel.PreviewCard(previewed);
+            await viewModel.WaitForBrowsePageAsync();
             window.UpdateLayout();
 
             var rowStars = Descendants(window.BrowseList)
@@ -1018,6 +1065,7 @@ public partial class App : Application
 
         viewModel.SelectTab(viewModel.Tabs[0]);
         viewModel.PreviewCard(card);
+        await viewModel.WaitForBrowsePageAsync();
         window.UpdateLayout();
 
         // 还没点文件的时候，内容页一块都不许画出来：它的开关绑错了对象就会一直盖在目录列表上，
@@ -1034,6 +1082,7 @@ public partial class App : Application
         foreach (var candidate in viewModel.Cards.Where(entry => entry.IsValid))
         {
             viewModel.PreviewCard(candidate);
+            await viewModel.WaitForBrowsePageAsync();
             window.UpdateLayout();
 
             foreach (var entry in viewModel.PreviewItems)
@@ -1150,6 +1199,7 @@ public partial class App : Application
         string key)
     {
         viewModel.PreviewFile(path);
+        await viewModel.WaitForBrowsePageAsync();
         var preview = viewModel.FilePreview;
 
         if (preview is null)
@@ -1163,8 +1213,9 @@ public partial class App : Application
             await Task.Delay(50);
         }
 
-        // PDF 的第一页要等界面报上显示宽度才渲（保证是 1:1 像素），所以这里再等一小会儿。
-        for (var tick = 0; tick < 40 && kind == FilePreviewKind.Pdf && preview.PdfPage is null; tick++)
+        // PDF 的第一页要等界面报上显示宽度才渲（保证是 1:1 像素），所以这里再等一会儿。
+        // 扫描件那种大页单页渲染能到好几秒，2 秒的窗口会把「慢」判成「坏」。
+        for (var tick = 0; tick < 200 && kind == FilePreviewKind.Pdf && preview.PdfPage is null; tick++)
         {
             window.UpdateLayout();
             await Task.Delay(50);
@@ -1273,6 +1324,7 @@ public partial class App : Application
 
                 // 切回去：这一轮后面还要按原文件截图，别把自检自己的现场改了。
                 viewModel.PreviewFile(path);
+                await viewModel.WaitForBrowsePageAsync();
             }
         }
 
@@ -1321,13 +1373,35 @@ public partial class App : Application
 
         if (viewport is null || image?.Source is not BitmapSource bitmap || image.ActualWidth <= 1)
         {
+            Log.Warning(
+                "PDF 那一块根本没画出可见的位图：滚动容器 {Viewport}，图片元素 {Image}，图源 {Source}，实际宽 {Width:F1} DIP",
+                viewport?.ActualWidth.ToString("F1") ?? "无",
+                image is null ? "无" : "有",
+                image?.Source is null ? "无" : "有",
+                image?.ActualWidth ?? -1);
+
             return false;
         }
 
         var pixelsPerDip = VisualTreeHelper.GetDpi(image).PixelsPerDip;
 
-        return bitmap.PixelWidth >= image.ActualWidth * pixelsPerDip * 0.9
-            && image.ActualWidth <= viewport.ActualWidth + 1;
+        var sharpEnough = bitmap.PixelWidth >= image.ActualWidth * pixelsPerDip * 0.9;
+        var fitsViewport = image.ActualWidth <= viewport.ActualWidth + 1;
+
+        if (!sharpEnough || !fitsViewport)
+        {
+            Log.Warning(
+                "PDF 清晰度判据没过：位图 {Bitmap}px / 显示 {Image:F1} DIP × 缩放 {Dpi:F2} = 需要 {Need:F0}px，栏宽 {Viewport:F1} DIP（清晰 {Sharp}、不超栏 {Fits}）",
+                bitmap.PixelWidth,
+                image.ActualWidth,
+                pixelsPerDip,
+                image.ActualWidth * pixelsPerDip,
+                viewport.ActualWidth,
+                sharpEnough,
+                fitsViewport);
+        }
+
+        return sharpEnough && fitsViewport;
     }
 
     /// <summary>
@@ -1413,6 +1487,7 @@ public partial class App : Application
             {
                 var first = viewModel.DesktopFiles[0];
                 viewModel.PreviewFile(first.Path);
+                await viewModel.WaitForBrowsePageAsync();
                 window.UpdateLayout();
                 await Task.Delay(200);
 
@@ -1450,6 +1525,7 @@ public partial class App : Application
         foreach (var candidate in viewModel.Cards.Where(entry => entry.IsValid))
         {
             viewModel.PreviewCard(candidate);
+            await viewModel.WaitForBrowsePageAsync();
             file = viewModel.PreviewItems.FirstOrDefault(entry => entry.HasPath && !entry.IsDirectory);
             if (file is not null)
             {
@@ -1466,7 +1542,9 @@ public partial class App : Application
 
         viewModel.SelectTab(viewModel.Tabs.First());
         viewModel.PreviewCard(source);
+        await viewModel.WaitForBrowsePageAsync();
         viewModel.PreviewFile(file.Path);
+        await viewModel.WaitForBrowsePageAsync();
         window.UpdateLayout();
         await Task.Delay(150);
 
@@ -1497,7 +1575,9 @@ public partial class App : Application
         // 搜索同理：那一眼也算看完了。
         viewModel.SelectTab(viewModel.Tabs.First());
         viewModel.PreviewCard(source);
+        await viewModel.WaitForBrowsePageAsync();
         viewModel.PreviewFile(file.Path);
+        await viewModel.WaitForBrowsePageAsync();
         window.UpdateLayout();
         await Task.Delay(150);
 
@@ -1528,6 +1608,312 @@ public partial class App : Application
         window.UpdateLayout();
     }
 
+    /// <summary>
+    /// 键盘导航的现场校验。条目本身 Focusable=False，焦点是视图模型里的「虚拟焦点」，
+    /// 所以这里必须靠真按键事件走一遍窗口处理器，而不是直接调视图模型的方法
+    /// —— 绑错一个按键名、或描边写成局部属性被压住，都只有渲染结果能抓出来。
+    /// </summary>
+    private async Task VerifyKeyboardFocusAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
+    {
+        var card = viewModel.Cards.FirstOrDefault(entry => entry.IsValid);
+
+        if (card is null)
+        {
+            Log.Warning("自检：没有有效卡片，跳过键盘导航校验");
+            return;
+        }
+
+        viewModel.ClosePreview();
+        viewModel.SelectTabCommand.Execute(viewModel.Tabs.First());
+        window.UpdateLayout();
+        await Task.Delay(120);
+
+        // ① 按一下 ↓：焦点该落到第一条，并且那条真的画出了 accent 描边。
+        RaiseKey(window, Key.Down);
+        window.UpdateLayout();
+
+        if (viewModel.FocusedItem is not { } first)
+        {
+            SmokeFail("按了方向键，焦点还不在任何条目上（窗口的按键处理没接上视图模型）");
+            return;
+        }
+
+        if (!IsFocusRingPainted(window, first))
+        {
+            SmokeFail("焦点条目的 accent 描边没画出来（多半是描边写成了局部属性，把 Style 的 DataTrigger 压住了）");
+        }
+
+        RaiseKey(window, Key.Down);
+        window.UpdateLayout();
+
+        if (ReferenceEquals(viewModel.FocusedItem, first))
+        {
+            SmokeFail("连按两下方向键，焦点没挪窝");
+        }
+        else
+        {
+            Log.Information(
+                "键盘导航校验通过：方向键从「{From}」走到「{To}」，焦点描边已画出，列数 {Columns}",
+                Name(first),
+                Name(viewModel.FocusedItem!),
+                viewModel.CardColumns);
+        }
+
+        // ② 回车 = 就地展开（不该把资源管理器叫起来）。
+        var openedBefore = viewModel.IsBrowsing;
+        RaiseKey(window, Key.Enter);
+        window.UpdateLayout();
+        await Task.Delay(200);
+
+        if (viewModel.IsBrowsing == openedBefore && viewModel.FocusedItem is IFocusable)
+        {
+            Log.Information("回车展开校验：焦点条目不是可展开的类型，界面保持原样（打开={Browsing}）", viewModel.IsBrowsing);
+        }
+        else
+        {
+            Log.Information("回车展开校验通过：浏览态 {Browsing}", viewModel.IsBrowsing);
+        }
+
+        // ③ Backspace 退回卡片网格。
+        RaiseKey(window, Key.Back);
+        window.UpdateLayout();
+        Log.Information("退层校验：Backspace 之后浏览态 {Browsing}", viewModel.IsBrowsing);
+        // ④ 列表行多选：选两行之后状态栏那句话必须真的出现在屏幕上（批量拖出与批量处理都靠它确认）。
+        // 挨个受管目录试到找到「至少两行」的那一层：只看第一张卡片的话，一个空目录
+        // 会让这一整段静默跳过 —— 这个坑以前踩过好几次，日志里只有一行"没跑"。
+        var picked = string.Empty;
+        List<PreviewEntry> rows = [];
+
+        foreach (var candidate in viewModel.Cards.Where(entry => entry.IsValid))
+        {
+            viewModel.PreviewCard(candidate);
+            await viewModel.WaitForBrowsePageAsync();
+            window.UpdateLayout();
+
+            rows = [.. viewModel.PreviewItems.Where(row => row.HasPath)];
+
+            if (rows.Count >= 2)
+            {
+                picked = candidate.DisplayName;
+                break;
+            }
+        }
+
+        if (rows.Count < 2)
+        {
+            Log.Warning("自检：受管目录里最满的一层也只有 {Count} 行，跳过行多选校验", rows.Count);
+        }
+        else
+        {
+            viewModel.HandleRowClick(rows[0], ctrl: false, shift: false);
+            viewModel.HandleRowClick(rows[1], ctrl: true, shift: false);
+            window.UpdateLayout();
+
+            if (viewModel.SelectedRowCount != 2)
+            {
+                SmokeFail($"Ctrl 加选之后行选区是 {viewModel.SelectedRowCount}，应该是 2");
+            }
+            else if (!Descendants(window).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == viewModel.StatusText))
+            {
+                SmokeFail($"状态栏「{viewModel.StatusText}」没画到屏幕上");
+            }
+            else
+            {
+                Log.Information(
+                    "行多选校验通过：在「{Folder}」里选了 {Count} 行，状态栏显示「{Status}」",
+                    picked,
+                    viewModel.SelectedRowCount,
+                    viewModel.StatusText);
+            }
+
+            // 批量口径：拖出与之后的批量处理必须看得见整批，而不是只剩按住的那一条。
+            var batch = viewModel.BatchRowPaths();
+
+            if (batch.Count != 2)
+            {
+                SmokeFail($"多选两行之后批量口径只收到 {batch.Count} 条，拖出会少带一个文件");
+            }
+            else
+            {
+                Log.Information("批量口径校验通过：多选 {Count} 行一次全带走", batch.Count);
+            }
+
+            // 不带修饰键的单击 = 「就以这条为准」，选区收成一条（资源管理器同一口径）。
+            viewModel.HandleRowClick(rows[0], ctrl: false, shift: false);
+
+            if (viewModel.SelectedRowCount != 1)
+            {
+                SmokeFail($"单击一行之后选区是 {viewModel.SelectedRowCount}，应该收成 1 条");
+            }
+
+            viewModel.ClearRowSelection();
+        }
+
+        viewModel.ClosePreview();
+        viewModel.SetFocus(null);
+        viewModel.ClosePreview();
+    }
+
+    /// <summary>
+    /// 卡片副标题的信息密度：最后修改时间要默认就在，总大小必须等用户问了才有
+    /// （默认算是「一打开面板就卡一下」的成因）。量的是屏幕上真的画出来的文字。
+    /// </summary>
+    private async Task VerifyCardFootprintAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
+    {
+        var card = viewModel.Cards.FirstOrDefault(entry => entry.IsValid);
+
+        if (card is null)
+        {
+            Log.Warning("自检：没有有效卡片，跳过足迹校验");
+            return;
+        }
+
+        // 条目数与修改时间是后台逐张填的（首屏不并发扫盘），先等这一张落定，最多 5 秒。
+        for (var tick = 0; tick < 100 && card.IsCountLoading; tick++)
+        {
+            await Task.Delay(50);
+        }
+
+        window.UpdateLayout();
+        await Task.Delay(120);
+
+        var texts = Descendants(window.CardsHost).OfType<TextBlock>().Select(text => text.Text).ToList();
+
+        if (string.IsNullOrEmpty(card.ModifiedText))
+        {
+            SmokeFail($"卡片「{card.DisplayName}」没取到最后修改时间");
+        }
+        else if (!texts.Contains(card.ModifiedText))
+        {
+            SmokeFail($"卡片上的最后修改时间「{card.ModifiedText}」没画到屏幕上");
+        }
+
+        if (card.HasSize)
+        {
+            SmokeFail("还没人问过大小，卡片就已经在称重了（默认算会拖慢首屏）");
+        }
+
+        // 问一下：算完要真出现在那一行里。
+        await card.MeasureSizeAsync();
+        window.UpdateLayout();
+        await Task.Delay(120);
+
+        if (!card.HasSize)
+        {
+            SmokeFail($"「计算总大小」没给出数字（{card.DisplayName}）");
+        }
+        else
+        {
+            var painted = Descendants(window.CardsHost)
+                .OfType<TextBlock>()
+                .Any(text => text.IsVisible && text.Text == card.SizeLine);
+
+            if (!painted)
+            {
+                SmokeFail($"算出来的「{card.SizeLine}」没画到卡片上");
+            }
+            else
+            {
+                Log.Information(
+                    "卡片足迹校验通过：默认显示「{Count} · {Modified}」，问过之后加上「{Size}」",
+                    card.CountText,
+                    card.ModifiedText,
+                    card.SizeLine);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 拖卡片到分组 Tab 归组：真拖拽在这台机器上合成不出来（WPF 不进 DoDragDrop），
+    /// 所以这里钉两件现场能验的事 —— 每枚分组 Tab 真的接受落点，且高亮真画得出来。
+    /// </summary>
+    private void VerifyTabDropTargets(FolderManagerWindow window, FolderManagerViewModel viewModel)
+    {
+        var groupTabs = Descendants(window)
+            .OfType<RadioButton>()
+            .Where(button => button.DataContext is GroupTabViewModel)
+            .ToList();
+
+        if (groupTabs.Count == 0)
+        {
+            Log.Warning("自检：屏幕上没有分组 Tab，跳过落点校验");
+            return;
+        }
+
+        var refusing = groupTabs.Where(button => !button.AllowDrop).ToList();
+
+        if (refusing.Count > 0)
+        {
+            SmokeFail($"{refusing.Count} 枚分组 Tab 没开 AllowDrop，卡片拖不上去（XAML 里漏了落点）");
+            return;
+        }
+
+        // 高亮必须画得出来：IsDropTarget 写成局部属性就会静默压住 DataTrigger。
+        var target = groupTabs[^1];
+        var tabId = ((GroupTabViewModel)target.DataContext!).Id;
+        viewModel.HighlightDropTab(tabId);
+        window.UpdateLayout();
+
+        if (window.TryFindResource("AccentSoftBrush") is not SolidColorBrush soft)
+        {
+            SmokeFail("找不到 AccentSoftBrush，落点高亮无从判起");
+            return;
+        }
+
+        var painted = Descendants(target)
+            .OfType<Border>()
+            .Select(border => border.Background as SolidColorBrush)
+            .Any(brush => brush is not null && brush.Color == soft.Color);
+
+        viewModel.HighlightDropTab(null);
+        window.UpdateLayout();
+
+        if (!painted)
+        {
+            SmokeFail("悬停高亮没画出来（落点看不见，用户不知道要往哪放）");
+        }
+        else
+        {
+            Log.Information("分组落点校验通过：{Count} 枚 Tab 接受落点，悬停高亮已画出", groupTabs.Count);
+        }
+    }
+
+    /// <summary>把一次按键真的送进窗口（走 PreviewKeyDown 的隧道路由，与键盘敲下来同一条路）。</summary>
+    private static void RaiseKey(Window window, Key key)
+    {
+        var source = PresentationSource.FromVisual(window);
+
+        if (source is null)
+        {
+            Log.Warning("自检：窗口还没有呈现源，按键校验跳过");
+            return;
+        }
+
+        window.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
+        {
+            RoutedEvent = UIElement.PreviewKeyDownEvent,
+        });
+    }
+
+    /// <summary>焦点条目对应的容器真的被描上了 accent 边？量渲染结果，不量视图模型的布尔。</summary>
+    private static bool IsFocusRingPainted(Window window, IFocusable item)
+    {
+        if (window.TryFindResource("AccentBrush") is not SolidColorBrush accent)
+        {
+            return false;
+        }
+
+        var painted = Descendants(window)
+            .OfType<Border>()
+            .Where(border => border.IsVisible && ReferenceEquals(border.DataContext, item))
+            .Select(border => border.BorderBrush as SolidColorBrush)
+            .Any(brush => brush is not null && brush.Color == accent.Color);
+
+        return painted;
+    }
+
+    private static string Name(IFocusable item) => item.FocusName;
+
     private async Task VerifyBrowseAndContentAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
     {
         var card = viewModel.Cards.FirstOrDefault(entry => entry.IsValid);
@@ -1544,6 +1930,7 @@ public partial class App : Application
 
         // ① 单击卡片 = 进入它：主区换成这一层的列表，卡片网格整块收起。
         viewModel.PreviewCard(card);
+        await viewModel.WaitForBrowsePageAsync();
         window.UpdateLayout();
         await Task.Delay(150);
 
@@ -1608,6 +1995,7 @@ public partial class App : Application
 
                 // 回到原来那一层：后面的步骤都在它上面做。
                 viewModel.BrowseTo(new BreadcrumbItem("复位", deep, true));
+                await viewModel.WaitForBrowsePageAsync();
                 window.UpdateLayout();
             }
         }
@@ -1635,6 +2023,7 @@ public partial class App : Application
             }
 
             viewModel.PreviewCard(card);
+            await viewModel.WaitForBrowsePageAsync();
             window.UpdateLayout();
         }
 
@@ -1652,6 +2041,7 @@ public partial class App : Application
             }
 
             viewModel.PreviewCard(candidate);
+            await viewModel.WaitForBrowsePageAsync();
             window.UpdateLayout();
 
             target = viewModel.PreviewItems.FirstOrDefault(entry =>
@@ -1666,6 +2056,7 @@ public partial class App : Application
         else
         {
             viewModel.PreviewFile(target.Path);
+            await viewModel.WaitForBrowsePageAsync();
             window.UpdateLayout();
 
             for (var tick = 0; tick < 40 && (viewModel.FilePreview?.IsBusy ?? false); tick++)
@@ -1719,6 +2110,7 @@ public partial class App : Application
 
         // ④ 内容已收起、又没下钻过目录，所以 ← 这一下就是「退出浏览」，主区回到卡片网格。
         viewModel.GoBackPreview();
+        await viewModel.WaitForBrowsePageAsync();
         window.UpdateLayout();
 
         if (viewModel.IsBrowsing)

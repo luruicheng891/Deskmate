@@ -19,7 +19,14 @@ public sealed class WindowService : IWindowService
 
     /// <inheritdoc />
     public Task<IReadOnlyList<AppWindowInfo>> GetWindowsAsync(string executablePath)
-        => Task.Run<IReadOnlyList<AppWindowInfo>>(() => Collect(executablePath));
+        => Task.Run<IReadOnlyList<AppWindowInfo>>(() => Collect(
+            string.IsNullOrWhiteSpace(executablePath)
+                ? string.Empty
+                : Path.GetFileNameWithoutExtension(executablePath)));
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<AppWindowInfo>> GetWindowsByProcessNameAsync(string processName)
+        => Task.Run<IReadOnlyList<AppWindowInfo>>(() => Collect(processName));
 
     /// <inheritdoc />
     public AppWindowInfo? PickClickTarget(IReadOnlyList<AppWindowInfo> windows, nint foregroundHandle)
@@ -95,16 +102,13 @@ public sealed class WindowService : IWindowService
         return sent;
     }
 
-    private IReadOnlyList<AppWindowInfo> Collect(string executablePath)
+    /// <summary>
+    /// 按进程名找出该进程当前的可切换窗口。<b>参数是不带扩展名的进程名，不是路径</b>
+    /// —— .lnk 应已由调用方解析成真实 exe，这里只按名字比。
+    /// </summary>
+    private IReadOnlyList<AppWindowInfo> Collect(string processName)
     {
-        if (string.IsNullOrWhiteSpace(executablePath))
-        {
-            return [];
-        }
-
-        // 进程名就是不带扩展名的 exe 文件名；.lnk 应已由调用方解析成真实 exe。
-        var processName = Path.GetFileNameWithoutExtension(executablePath);
-        if (processName.Length == 0)
+        if (string.IsNullOrWhiteSpace(processName))
         {
             return [];
         }

@@ -112,7 +112,12 @@ public sealed partial class TrayViewModel : ObservableObject
 
     /// <summary>退出程序。</summary>
     [RelayCommand]
-    private void Exit() => Application.Current.Shutdown();
+    private void Exit()
+    {
+        // 记下点击时刻，退出耗时日志用它算「点退出到 OnExit」这一段（WPF 在其间关所有窗口）。
+        App.ExitRequestedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        Application.Current.Shutdown();
+    }
 
     private void RefreshState()
     {

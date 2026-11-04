@@ -5,6 +5,7 @@
              Focusable="False">
 
     <Border x:Name="Shell"
+            ToolTip="{Binding Tip}"
             Width="{Binding DataContext.CardItemWidth, RelativeSource={RelativeSource AncestorType=Window}}"
             MinHeight="98"
             Margin="0,0,12,12"
@@ -27,6 +28,10 @@
                     <!-- 选中只换底色、不加粗边框：改 BorderThickness 会让整张卡片抖 1px -->
                     <DataTrigger Binding="{Binding IsSelected}" Value="True">
                         <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+                    </DataTrigger>
+                    <!-- 键盘焦点：描一根accent边。方向键走到哪必须看得出来，否则等于按键失灵 -->
+                    <DataTrigger Binding="{Binding IsFocused}" Value="True">
+                        <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
                     </DataTrigger>
                 </Style.Triggers>
             </Style>
@@ -76,6 +81,16 @@
                             <TextBlock Text="{Binding CountText}"
                                        FontSize="11"
                                        Foreground="{DynamicResource TextSecondaryBrush}" />
+                            <TextBlock Text="{Binding ModifiedText}"
+                                       FontSize="11"
+                                       Margin="8,0,0,0"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                            <!-- 总大小不默认算（要遍历整棵树），算过才显示这一截 -->
+                            <TextBlock Text="{Binding SizeLine}"
+                                       FontSize="11"
+                                       Margin="8,0,0,0"
+                                       Visibility="{Binding HasSize, Converter={StaticResource BoolToVis}}"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
                             <TextBlock Text="　路径不存在"
                                        FontSize="11"
                                        Foreground="{DynamicResource InvalidBrush}"
@@ -117,6 +132,9 @@
             <ContextMenu MinWidth="184">
                 <MenuItem Header="打开文件夹" Command="{Binding OpenCommand}" />
                 <MenuItem Header="预览内部文件" Command="{Binding PreviewCommand}" />
+                <MenuItem Header="复制路径" Command="{Binding CopyPathCommand}" ToolTip="把这个目录的真实路径放进剪贴板" />
+                <MenuItem Header="计算总大小" Command="{Binding MeasureSizeCommand}"
+                          ToolTip="整棵树称重（大目录会慢一些），算出来的数字留在卡片副标题上" />
                 <MenuItem Header="在这个目录里新建…" Command="{Binding CreateCommand}" />
                 <Separator />
                 <MenuItem Header="加入收藏"

@@ -72,6 +72,14 @@ public partial class DockWindow : Window
     private readonly DispatcherTimer _previewHideTimer;
     private readonly DispatcherTimer _taskbarOrderTimer;
 
+    /// <summary>
+    /// 桌面 Z 序变化钩子。贴边时 Dock 与任务栏在同一条带子里抢位置，explorer 抢走的那一刻
+    /// 点在那儿的鼠标消息是给任务栏的 —— 100 毫秒一次的轮询最快也要空出这一截，用户读到的就是
+    /// 「Dock 点一下没反应，过两秒再点才打开」。听事件是为了把这段空隙压到几毫秒。
+    /// 轮询照旧留着当兜底（事件可能因为我们的线程正忙而晚到）。
+    /// </summary>
+    private readonly DesktopOrderWatcher _desktopOrder = new();
+
     // Dock 压在任务栏那条带子里时才需要盯 Z 序，其他情况完全不跑。
     private bool _overlapsTaskbar;
     private bool _raisedAboveTaskbar;
@@ -178,6 +186,7 @@ public partial class DockWindow : Window
             _previewShowTimer.Stop();
             _previewHideTimer.Stop();
             _taskbarOrderTimer.Stop();
+            _desktopOrder.Stop();
             _overlapsTaskbar = false;
             _preview.Dismiss();
             _viewModel.StopRunningPolling();
@@ -189,9 +198,19 @@ public partial class DockWindow : Window
             return;
         }
 
-        if (!IsVisible)
+        var wasHidden = !IsVisible;
+        if (wasHidden)
         {
             Show();
+        }
+
+        // 隐藏时 _overlapsTaskbar 被清零、盯任务栏 Z 序的定时器也停了（见上面的 !visible 分支）。
+        // 只 Show() 的话它们不会自己回来：Dock 贴边压在任务栏那条带子里，explorer 一把任务栏抬回去，
+        // Dock 就被盖住，收不到悬停和点击 —— 退出全屏后"鼠标放上去没反应"就是这个。
+        // Reposition 会重算 _overlapsTaskbar、重启定时器并立刻抬一次。
+        if (wasHidden)
+        {
+            Reposition();
         }
 
         _viewModel.StartRunningPolling();
@@ -1023,11 +1042,13 @@ public partial class DockWindow : Window
         if (_overlapsTaskbar)
         {
             _taskbarOrderTimer.Start();
+            _desktopOrder.Start(KeepAboveTaskbar);
             KeepAboveTaskbar();
         }
         else
         {
             _taskbarOrderTimer.Stop();
+            _desktopOrder.Stop();
             _raisedAboveTaskbar = false;
         }
 

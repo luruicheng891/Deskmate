@@ -21,7 +21,7 @@ public class CardColumnTests : IDisposable
     {
         var config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         var folders = new FolderService(config, NullLogger<FolderService>.Instance);
-        return new FolderManagerViewModel(folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), NullLogger<FolderManagerViewModel>.Instance);
+        return new FolderManagerViewModel(folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
     }
 
     [Theory]

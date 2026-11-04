@@ -34,6 +34,41 @@ public static class PathInterop
         return GetLongPathNameW(path, buffer, (uint)buffer.Capacity) == 0 ? path : buffer.ToString();
     }
 
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+    /// <summary>
+    /// 取进程的可执行文件路径，读不到返回 null。只要 <c>PROCESS_QUERY_LIMITED_INFORMATION</c>，
+    /// 比 <c>Process.MainModule</c> 宽松得多：后者要枚举模块，商店应用（AppContainer）的进程常被拒。
+    /// </summary>
+    public static string? TryGetProcessImagePath(uint processId)
+    {
+        var handle = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (handle == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            var buffer = new StringBuilder(1024);
+            var size = (uint)buffer.Capacity;
+            return QueryFullProcessImageNameW(handle, 0, buffer, ref size) ? buffer.ToString() : null;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
     /// <summary>取 8.3 短路径；卷上没启用短文件名时返回原路径。</summary>
     public static string GetShortPath(string path)
     {

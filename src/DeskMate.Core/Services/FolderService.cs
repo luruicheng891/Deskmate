@@ -70,6 +70,47 @@ public sealed class FolderService : IFolderService
     }
 
     /// <inheritdoc />
+    public async Task RestoreAsync(IEnumerable<FolderItem> snapshots)
+    {
+        var folders = _config.Current.Folders;
+        var added = 0;
+
+        foreach (var snapshot in snapshots)
+        {
+            // 已经在了就不重复放（撤销被点两次、或用户自己又加了一遍）。
+            if (folders.Any(item => item.Id == snapshot.Id))
+            {
+                continue;
+            }
+
+            folders.Add(Clone(snapshot));
+            added++;
+        }
+
+        if (added > 0)
+        {
+            // 放回之后按记录里的 Order 重排，位置也一起还原。
+            var ordered = folders.OrderBy(item => item.Order).ToList();
+            folders.Clear();
+            folders.AddRange(ordered);
+            await _config.SaveAsync();
+        }
+    }
+
+    /// <summary>快照要拷一份：配置里那份集合会被后续改动复用，塞引用进去会一起被改。</summary>
+    private static FolderItem Clone(FolderItem source) => new()
+    {
+        Id = source.Id,
+        DisplayName = source.DisplayName,
+        RealPath = source.RealPath,
+        GroupId = source.GroupId,
+        Color = source.Color,
+        Order = source.Order,
+        Valid = source.Valid,
+        LastChecked = source.LastChecked,
+    };
+
+    /// <inheritdoc />
     public async Task RenameDisplayAsync(string id, string newName)
     {
         var item = Find(id);
@@ -230,6 +271,10 @@ public sealed class FolderService : IFolderService
 
     /// <inheritdoc />
     public Task<int> CountFilesAsync(string path) => Task.Run(() => CountFiles(path, _logger));
+
+    /// <inheritdoc />
+    public Task<FolderFootprint> MeasureAsync(string path, bool wantSize)
+        => Task.Run(() => Measure(path, wantSize, _logger));
 
     /// <inheritdoc />
     public IReadOnlyList<FolderGroup> GetGroups()
@@ -496,13 +541,39 @@ public sealed class FolderService : IFolderService
     /// 跳过再解析点（junction / 符号链接），否则会顺着循环引用无限计数。
     /// </summary>
     public static int CountFiles(string path, ILogger? logger = null)
+        => Measure(path, wantSize: false, logger).FileCount;
+
+    /// <summary>
+    /// 一次遍历同时数清文件、（可选）称重总大小，并取目录自身的最后修改时间。
+    /// <para>
+    /// 总大小默认不算：它要求对每个文件都 stat 一次，网络盘与机械盘上代价完全不同量级。
+    /// 调用方按「用户真问了再算」来用。
+    /// </para>
+    /// </summary>
+    public static FolderFootprint Measure(string path, bool wantSize, ILogger? logger = null)
     {
+        var modified = DateTime.MinValue;
+
+        try
+        {
+            if (DirectoryExists(path))
+            {
+                modified = Directory.GetLastWriteTime(path);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug(ex, "读取目录时间失败 {Path}", path);
+        }
+
         if (!DirectoryExists(path))
         {
-            return 0;
+            return new FolderFootprint(0, 0, false, modified);
         }
 
         var count = 0;
+        long size = 0;
+        var measured = wantSize;
         var pending = new Stack<string>();
         pending.Push(path);
 
@@ -514,9 +585,29 @@ public sealed class FolderService : IFolderService
                 foreach (var file in Directory.EnumerateFiles(current))
                 {
                     count++;
-                    if (count >= FileCountCap)
+
+                    if (wantSize)
                     {
-                        return FileCountCap;
+                        try
+                        {
+                            size += new FileInfo(file).Length;
+                        }
+                        catch (Exception ex)
+                        {
+                            logger?.LogDebug(ex, "称重时跳过读不到的文件 {Path}", file);
+                        }
+
+                        if (size > FolderFootprint.SizeCap)
+                        {
+                            // 大到超过上限就不继续称了：报出来的数字必须是数的，不是估的。
+                            measured = false;
+                            wantSize = false;
+                        }
+                    }
+
+                    if (count >= FolderFootprint.FileCountCap)
+                    {
+                        return new FolderFootprint(FolderFootprint.FileCountCap, size, measured && count < FolderFootprint.FileCountCap, modified);
                     }
                 }
 
@@ -531,13 +622,15 @@ public sealed class FolderService : IFolderService
             catch (UnauthorizedAccessException)
             {
                 logger?.LogDebug("统计文件数时跳过无权限目录 {Path}", current);
+                measured = false;
             }
             catch (IOException)
             {
                 logger?.LogDebug("统计文件数时跳过损坏目录 {Path}", current);
+                measured = false;
             }
         }
 
-        return count;
+        return new FolderFootprint(count, size, measured, modified);
     }
 }

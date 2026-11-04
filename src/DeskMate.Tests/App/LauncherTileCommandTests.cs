@@ -192,6 +192,8 @@ public sealed class LauncherTileCommandTests : IDisposable
         public Task<IReadOnlyList<RunningApp>> SnapshotRunningAppsAsync() => Task.FromResult<IReadOnlyList<RunningApp>>([]);
 
         public bool IsRunning(string executablePath, IReadOnlySet<string> runningNames) => false;
+
+        public IDisposable WatchProcessExits(IEnumerable<string> processNames, Action onExit) => new NoExitWatch();
     }
 
     private sealed class RecordingLauncherService : IAppLauncherService
@@ -229,6 +231,9 @@ public sealed class LauncherTileCommandTests : IDisposable
     private sealed class FakeWindows : IWindowService
     {
         public Task<IReadOnlyList<AppWindowInfo>> GetWindowsAsync(string executablePath)
+            => Task.FromResult<IReadOnlyList<AppWindowInfo>>([]);
+
+        public Task<IReadOnlyList<AppWindowInfo>> GetWindowsByProcessNameAsync(string processName)
             => Task.FromResult<IReadOnlyList<AppWindowInfo>>([]);
 
         public AppWindowInfo? PickClickTarget(IReadOnlyList<AppWindowInfo> windows, nint foregroundHandle)

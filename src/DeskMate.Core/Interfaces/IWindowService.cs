@@ -12,6 +12,13 @@ public interface IWindowService
     Task<IReadOnlyList<AppWindowInfo>> GetWindowsAsync(string executablePath);
 
     /// <summary>
+    /// 按<b>进程名</b>（不带扩展名）取可见窗口，同样按 Z 序。
+    /// 启动之后等那个应用把窗口建出来要用它：那时我们只知道刚起来的进程叫什么，
+    /// 不一定拿得到它的完整 exe 路径（shell 接手的情况尤其如此）。
+    /// </summary>
+    Task<IReadOnlyList<AppWindowInfo>> GetWindowsByProcessNameAsync(string processName);
+
+    /// <summary>
     /// 决定点击图标时该操作哪个窗口：其中某个正在前台就选它（点击语义变成最小化），
     /// 否则选最上面那个。纯函数，便于单测。
     /// </summary>

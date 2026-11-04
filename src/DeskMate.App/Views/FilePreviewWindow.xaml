@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:DeskMate.App.Controls"
         Title="DeskMate 文件预览"
+        Icon="/Resources/Icons/DeskMate.ico"
         Width="1080"
         Height="760"
         MinWidth="520"

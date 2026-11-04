@@ -24,7 +24,15 @@ public sealed class FullscreenService : IFullscreenDetector, IDisposable
     /// </summary>
     private static readonly TimeSpan RecheckInterval = TimeSpan.FromMilliseconds(400);
 
+    /// <summary>
+    /// 收到外壳的全屏通知后补判一次的等待时间。通知到达的那一刻前台窗口可能还没切过去、矩形也还没改完，
+    /// 立刻判一次常常还是「没全屏」；等这么久再判一次，不用把 400 ms 轮询缩短。
+    /// </summary>
+    private static readonly TimeSpan NotifySettleDelay = TimeSpan.FromMilliseconds(250);
+
     private readonly ILogger<FullscreenService> _logger;
+    private AppBarFullscreenNotifier? _appBar;
+    private DispatcherTimer? _settle;
     private DispatcherTimer? _recheck;
     private string _lastNearMiss = string.Empty;
     private bool _isFullscreen;
@@ -59,7 +67,61 @@ public sealed class FullscreenService : IFullscreenDetector, IDisposable
         _recheck.Tick += (_, _) => Recheck();
         _recheck.Start();
 
+        StartAppBarNotifier();
+
         _logger.LogInformation("全屏检测已启动，初始状态 {Fullscreen}", _isFullscreen);
+    }
+
+    /// <summary>
+    /// 再挂一路外壳的全屏通知（系统任务栏自己用的那条）。它只是「该重判了」的信号，
+    /// 注册失败不影响前台事件与轮询这两路，所以只记日志、不抛。
+    /// </summary>
+    private void StartAppBarNotifier()
+    {
+        try
+        {
+            _appBar = new AppBarFullscreenNotifier();
+            _appBar.FullscreenAppChanged += OnShellFullscreenNotice;
+
+            if (_appBar.IsRegistered)
+            {
+                _logger.LogInformation("已向外壳注册全屏通知（ABN_FULLSCREENAPP）");
+            }
+            else
+            {
+                _logger.LogWarning("向外壳注册全屏通知失败，只靠前台事件与 {Interval} ms 轮询", RecheckInterval.TotalMilliseconds);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "创建全屏通知窗口失败，只靠前台事件与轮询");
+            _appBar?.Dispose();
+            _appBar = null;
+        }
+    }
+
+    private void OnShellFullscreenNotice(object? sender, bool entering)
+    {
+        _logger.LogDebug("外壳全屏通知：{State}", entering ? "有全屏应用" : "全屏应用已退出");
+
+        Recheck();
+
+        // 补判一次：通知到时前台窗口多半还没更新。
+        _settle ??= CreateSettleTimer();
+        _settle.Stop();
+        _settle.Start();
+    }
+
+    private DispatcherTimer CreateSettleTimer()
+    {
+        var timer = new DispatcherTimer { Interval = NotifySettleDelay };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            Recheck();
+        };
+
+        return timer;
     }
 
     /// <summary>停止监听并释放钩子。</summary>
@@ -73,6 +135,16 @@ public sealed class FullscreenService : IFullscreenDetector, IDisposable
         _watching = false;
         _recheck?.Stop();
         _recheck = null;
+        _settle?.Stop();
+        _settle = null;
+
+        if (_appBar is not null)
+        {
+            _appBar.FullscreenAppChanged -= OnShellFullscreenNotice;
+            _appBar.Dispose();
+            _appBar = null;
+        }
+
         FullscreenDetector.StopWatching();
     }
 

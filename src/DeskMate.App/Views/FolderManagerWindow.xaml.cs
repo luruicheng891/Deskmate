@@ -20,6 +20,9 @@ public partial class FolderManagerWindow : Window
     /// <summary>卡片拖拽排序的数据格式。</summary>
     private const string CardIdFormat = "DeskMate.FolderCardId";
 
+    /// <summary>这一次拖拽涉及的整批卡片 id（多选后拖其中一张 = 拖整批）。</summary>
+    private const string CardIdsFormat = "DeskMate.FolderCardIds";
+
     private readonly FolderManagerViewModel _viewModel;
     private readonly ILogger<FolderManagerWindow> _logger;
     private readonly FilePreviewWindow _filePreview;
@@ -68,6 +71,12 @@ public partial class FolderManagerWindow : Window
         viewModel.FilePopoutRequested += OnFilePopoutRequested;
         viewModel.EntryRenameRequested += OnEntryRenameRequested;
         viewModel.EntryDeleteConfirmRequested += OnEntryDeleteConfirmRequested;
+        viewModel.ScrollToEntryRequested += OnScrollToEntryRequested;
+        viewModel.FocusChanged += OnFocusChanged;
+
+        // 真实面板才开「现场」能力（磁盘监听自动重举 + 大目录后台列举）；
+        // 单元测试里这个开关是关的，列表同步出结果，断言才是确定的。
+        viewModel.EnableLiveBrowse();
 
         // 放大窗自己收到「松手」时（焦点在它那边），主窗这边的按住记录也要跟着结掉。
         _filePreview.HoldReleased += () => _popoutHeld = false;
@@ -168,6 +177,8 @@ public partial class FolderManagerWindow : Window
         _viewModel.BatchDeleteRequested -= OnBatchDeleteRequested;
         _viewModel.EntryRenameRequested -= OnEntryRenameRequested;
         _viewModel.EntryDeleteConfirmRequested -= OnEntryDeleteConfirmRequested;
+        _viewModel.ScrollToEntryRequested -= OnScrollToEntryRequested;
+        _viewModel.FocusChanged -= OnFocusChanged;
         RenameOverlay.IsVisibleChanged -= OnRenameOverlayVisibleChanged;
         NewGroupOverlay.IsVisibleChanged -= OnNewGroupOverlayVisibleChanged;
         RenameGroupOverlay.IsVisibleChanged -= OnRenameGroupOverlayVisibleChanged;
@@ -184,6 +195,19 @@ public partial class FolderManagerWindow : Window
 
         // 焦点在输入框里时，Ctrl+A / Delete 属于编辑操作，不能抢去动卡片。
         var typing = Keyboard.FocusedElement is TextBox;
+
+        if (e.Key == Key.F5)
+        {
+            // 资源管理器的手感：F5 = 重数这一层（没在浏览时就是空操作）。
+            _viewModel.RefreshBrowseCommand.Execute(null);
+            e.Handled = true;
+            return;
+        }
+
+        if (TryHandleNavigationKey(e, typing))
+        {
+            return;
+        }
 
         if (!typing && e.Key == Key.A && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
         {
@@ -456,6 +480,7 @@ public partial class FolderManagerWindow : Window
         // 只带自定义格式的话，拖出去对方一律显示「不可放置」。
         var data = new DataObject();
         data.SetData(CardIdFormat, card.Id);
+        data.SetData(CardIdsFormat, _viewModel.DragIdsFor(card));
         data.SetData(DataFormats.FileDrop, _viewModel.DragPathsFor(card).ToArray());
 
         DragDrop.DoDragDrop(this, data, DragDropEffects.Move | DragDropEffects.Copy);
@@ -531,14 +556,117 @@ public partial class FolderManagerWindow : Window
     private void OnPreviewEntryPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         _previewDragStart = e.GetPosition(this);
+
         // 行尾的星星是按钮，按下它不该顺带把这一行变成拖拽候选
-        _previewDragCandidate = IsButtonHit(e.OriginalSource as DependencyObject)
+        var row = IsButtonHit(e.OriginalSource as DependencyObject)
             ? null
             : Resolve<PreviewEntry>(e.OriginalSource as DependencyObject);
+
+        _previewDragCandidate = row;
+
+        // 按在空白处（行与行之间、列表末尾）才算框选；按在星星那种按钮上不算，那一下属于按钮。
+        if (row is null && !IsButtonHit(e.OriginalSource as DependencyObject))
+        {
+            BeginBand(e.GetPosition(BrowseHost));
+        }
+    }
+
+    private bool _banding;
+
+    private Point _bandStart;
+
+    /// <summary>按住空白处起手框选：抓住鼠标，之后每一寸移动都算进矩形里。</summary>
+    private void BeginBand(Point start)
+    {
+        _banding = true;
+        _bandStart = start;
+        BandRect.Visibility = Visibility.Visible;
+        UpdateBand(start);
+        BrowseList.CaptureMouse();
+    }
+
+    /// <summary>拖动中：矩形跟着指针长，选区实时跟着矩形变。</summary>
+    private void OnBandMove(MouseEventArgs e)
+    {
+        if (!_banding)
+        {
+            return;
+        }
+
+        var here = e.GetPosition(BrowseHost);
+        UpdateBand(here);
+        _viewModel.ApplyRowBandSelection(PathsInsideBand(), Keyboard.Modifiers.HasFlag(ModifierKeys.Control));
+        e.Handled = true;
+    }
+
+    private void UpdateBand(Point current)
+    {
+        var left = Math.Min(current.X, _bandStart.X);
+        var top = Math.Min(current.Y, _bandStart.Y);
+
+        BandRect.Width = Math.Abs(current.X - _bandStart.X);
+        BandRect.Height = Math.Abs(current.Y - _bandStart.Y);
+        BandRect.Margin = new Thickness(Math.Max(0, left), Math.Max(0, top), 0, 0);
+    }
+
+    /// <summary>与矩形相交的那些行：只数已经生成出来的容器（虚拟化的列表本来就只画得起这些）。</summary>
+    private IEnumerable<string> PathsInsideBand()
+    {
+        var box = new Rect(BandRect.Margin.Left, BandRect.Margin.Top, BandRect.Width, BandRect.Height);
+
+        if (box.Width < 2 && box.Height < 2)
+        {
+            return [];
+        }
+
+        var hits = new List<string>();
+
+        for (var index = 0; index < BrowseList.Items.Count; index++)
+        {
+            // 虚拟化的列表只生成了看得见的那些行容器；拿不到容器的行本来也不在屏幕上，框不到。
+            if (BrowseList.ItemContainerGenerator.ContainerFromIndex(index) is not FrameworkElement container)
+            {
+                continue;
+            }
+
+            var bounds = container.TransformToVisual(BrowseHost)
+                .TransformBounds(new Rect(0, 0, container.ActualWidth, container.ActualHeight));
+
+            if (!bounds.IntersectsWith(box))
+            {
+                continue;
+            }
+
+            if (BrowseList.ItemContainerGenerator.ItemFromContainer(container) is PreviewEntry { HasPath: true } row)
+            {
+                hits.Add(row.Path);
+            }
+        }
+
+        return hits;
+    }
+
+    /// <summary>松手：收掉矩形与鼠标捕获。</summary>
+    private void EndBand()
+    {
+        if (!_banding)
+        {
+            return;
+        }
+
+        _banding = false;
+        BandRect.Visibility = Visibility.Collapsed;
+        BrowseList.ReleaseMouseCapture();
     }
 
     private void OnPreviewEntryMouseMove(object sender, MouseEventArgs e)
     {
+        if (_banding)
+        {
+            OnBandMove(e);
+            return;
+        }
+
         if (e.LeftButton != MouseButtonState.Pressed || _previewDragCandidate is not { } entry)
         {
             return;
@@ -550,7 +678,7 @@ public partial class FolderManagerWindow : Window
         }
 
         _previewDragCandidate = null;
-        StartFileDrag([entry.Path]);
+        StartFileDrag(_viewModel.DragRowPaths(entry));
     }
 
     private void OnDesktopFilePreviewMouseDown(object sender, MouseButtonEventArgs e)
@@ -645,6 +773,13 @@ public partial class FolderManagerWindow : Window
 
     private void OnPreviewEntryClick(object sender, MouseButtonEventArgs e)
     {
+        if (_banding)
+        {
+            EndBand();
+            e.Handled = true;
+            return;
+        }
+
         if (IsButtonHit(e.OriginalSource as DependencyObject))
         {
             return;
@@ -656,8 +791,13 @@ public partial class FolderManagerWindow : Window
         }
 
         // 单击目录 = 走进它；单击文件 = 右边内容窗格看它。这一栏从头到尾都只是看，
-        // 不会启动任何东西 —— 打开仍然是双击。
+        // 不会启动任何东西 —— 打开仍然是双击。Ctrl/Shift 是加选与连选，那一下不展开。
         RememberGesture(entry);
+
+        if (!_viewModel.HandleRowClick(entry, Keyboard.Modifiers.HasFlag(ModifierKeys.Control), Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)))
+        {
+            return;
+        }
 
         if (entry.IsDirectory)
         {
@@ -682,6 +822,214 @@ public partial class FolderManagerWindow : Window
         {
             _viewModel.OpenPreviewEntry(entry);
             e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// 键盘导航。条目本身 <c>Focusable=False</c>（这套面板一开始就不是靠 WPF 焦点走的），
+    /// 所以方向键不能交给控件自己处理 —— 由视图模型持「虚拟焦点」，窗口只负责按键到动作的翻译和把行滚进视野。
+    /// <para>
+    /// 输入框里、按钮上（回车是激活按钮）一律不抢；回车抢了按钮就是「Tab 到星星按回车没反应」。
+    /// </para>
+    /// </summary>
+    private bool TryHandleNavigationKey(KeyEventArgs e, bool typing)
+    {
+        if (typing)
+        {
+            return false;
+        }
+
+        var onButton = Keyboard.FocusedElement is System.Windows.Controls.Primitives.ButtonBase;
+        var control = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
+
+        switch (e.Key)
+        {
+            case Key.Up when control && _viewModel.IsBrowsing:
+                _viewModel.GoUpOneLevel();
+                e.Handled = true;
+                return true;
+            case Key.Up:
+                _viewModel.MoveFocus(0, -1);
+                e.Handled = true;
+                return true;
+            case Key.Down:
+                _viewModel.MoveFocus(0, 1);
+                e.Handled = true;
+                return true;
+            case Key.Left when _viewModel.IsBrowsing && _viewModel.FilePreview is not null:
+                // 浏览列表是单列的：左右键在这儿最有用的事是「同层翻文件」，而不是撞墙。
+                _viewModel.StepSiblingFile(-1);
+                e.Handled = true;
+                return true;
+            case Key.Right when _viewModel.IsBrowsing && _viewModel.FilePreview is not null:
+                _viewModel.StepSiblingFile(1);
+                e.Handled = true;
+                return true;
+            case Key.Left:
+                _viewModel.MoveFocus(-1, 0);
+                e.Handled = true;
+                return true;
+            case Key.Right:
+                _viewModel.MoveFocus(1, 0);
+                e.Handled = true;
+                return true;
+            case Key.PageUp:
+                _viewModel.MoveFocus(0, -10);
+                e.Handled = true;
+                return true;
+            case Key.PageDown:
+                _viewModel.MoveFocus(0, 10);
+                e.Handled = true;
+                return true;
+            case Key.Home:
+                _viewModel.MoveFocusToFirst();
+                e.Handled = true;
+                return true;
+            case Key.End:
+                _viewModel.MoveFocusToLast();
+                e.Handled = true;
+                return true;
+            case Key.Back when _viewModel.IsBrowsing:
+                _viewModel.GoUpOneLevel();
+                e.Handled = true;
+                return true;
+            case Key.Enter when !onButton:
+                // 回车 = 就地展开（目录走进去 / 文件看内容）；Ctrl+回车 = 交给系统打开。
+                _viewModel.ActivateFocused(openExternally: control);
+                e.Handled = true;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>焦点换了条目：把它滚进视野，否则方向键走到屏幕外就等于「按了没反应」。</summary>
+    private void OnFocusChanged(object? sender, EventArgs e)
+    {
+        if (_viewModel.FocusedItem is not { } item)
+        {
+            return;
+        }
+
+        var host = ActiveFocusHost();
+
+        if (host is null)
+        {
+            return;
+        }
+
+        host.UpdateLayout();
+
+        if (host is ListBox list)
+        {
+            list.ScrollIntoView(item);
+            return;
+        }
+
+        if (host.ItemContainerGenerator.ContainerFromItem(item) is FrameworkElement container)
+        {
+            container.BringIntoView();
+        }
+    }
+
+    /// <summary>当前该由哪一块接焦点 —— 判据与视图模型里的 FocusHost 必须一致。</summary>
+    private ItemsControl? ActiveFocusHost() => _viewModel switch
+    {
+        { IsBrowsing: true } => BrowseList,
+        { IsSearchView: true } => SearchHost,
+        { IsFavoritesView: true } => FavoritesHost,
+        { IsDesktopView: true } => DesktopHost,
+        _ => CardsHost,
+    };
+
+    // ==================== 拖卡片到分组 Tab 上归组 ====================
+
+    /// <summary>
+    /// 拖拽经过某枚分组 Tab：只有「带卡片 id 的内部拖拽」才算可落点，
+    /// 从外部拖文件进来落到 Tab 上是「加入管理」，不该被当成归组。
+    /// </summary>
+    private void OnTabDragOver(object sender, DragEventArgs e)
+    {
+        var canDrop = e.Data.GetDataPresent(CardIdFormat) && sender is RadioButton { Tag: string };
+
+        e.Effects = canDrop ? DragDropEffects.Move : DragDropEffects.None;
+        e.Handled = canDrop;
+
+        if (canDrop)
+        {
+            _viewModel.HighlightDropTab((string)((RadioButton)sender).Tag);
+        }
+    }
+
+    private void OnTabDragLeave(object sender, DragEventArgs e) => _viewModel.HighlightDropTab(null);
+
+    private async void OnTabDrop(object sender, DragEventArgs e)
+    {
+        _viewModel.HighlightDropTab(null);
+
+        if (sender is not RadioButton { Tag: string tabId })
+        {
+            return;
+        }
+
+        var ids = ReadDroppedIds(e);
+
+        if (ids.Count == 0)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        await _viewModel.MoveToGroupAsync(tabId, ids);
+    }
+
+    /// <summary>整批 id 优先；拿不到（外部程序自己构造的拖拽数据）才退回单张那一份。</summary>
+    private IReadOnlyList<string> ReadDroppedIds(DragEventArgs e)
+    {
+        if (e.Data.GetData(CardIdsFormat) is string[] batch && batch.Length > 0)
+        {
+            return batch;
+        }
+
+        return e.Data.GetData(CardIdFormat) is string single ? [single] : [];
+    }
+
+    /// <summary>列头点一下：同一列翻转方向，换列则按该列的习惯给默认方向。</summary>
+    private void OnSortHeaderClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string key })
+        {
+            _ = _viewModel.ToggleSortAsync(key);
+        }
+    }
+
+    /// <summary>
+    /// 滚到列表底：补下一批行。留 48px 提前量，让人滚到底时下一批已经在屏幕上，
+    /// 而不是停在一个空末尾再等。
+    /// </summary>
+    private void OnBrowseListScrolled(object sender, ScrollChangedEventArgs e)
+    {
+        if (e.ExtentHeight <= 0)
+        {
+            return;
+        }
+
+        if (e.VerticalOffset + e.ViewportHeight >= e.ExtentHeight - 48)
+        {
+            _viewModel.LoadMoreIfNeeded();
+        }
+    }
+
+    /// <summary>重举（排序切换 / 自动刷新 / F5）之后把原来在看的那一行滚回视野。</summary>
+    private void OnScrollToEntryRequested(object? sender, string path)
+    {
+        var target = _viewModel.PreviewItems.FirstOrDefault(
+            entry => entry.HasPath
+                && string.Equals(entry.Path.TrimEnd('\\', '/'), path.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+
+        if (target is not null)
+        {
+            BrowseList.ScrollIntoView(target);
         }
     }
 
@@ -776,7 +1124,7 @@ public partial class FolderManagerWindow : Window
     /// <summary>
     /// 某一行的「重命名」：弹输入框。名字敲坏了由视图模型挡住，不改任何东西。
     /// </summary>
-    private async void OnEntryRenameRequested(object? sender, PreviewEntry entry)
+    private async void OnEntryRenameRequested(object? sender, EntryTarget entry)
     {
         var name = TextInputWindow.Ask(
             "重命名",
@@ -795,7 +1143,7 @@ public partial class FolderManagerWindow : Window
     /// 某一行的「移到回收站」：必须二次确认，而且默认按钮是「否」。
     /// 说清是进回收站（还能还原），不是被抹掉 —— 这是整个面板唯一会动到磁盘的按钮。
     /// </summary>
-    private async void OnEntryDeleteConfirmRequested(object? sender, PreviewEntry entry)
+    private async void OnEntryDeleteConfirmRequested(object? sender, EntryTarget entry)
     {
         var answer = MessageBox.Show(
             $"把「{entry.Name}」移到回收站？"

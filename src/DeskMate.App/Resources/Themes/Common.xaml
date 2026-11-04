@@ -234,6 +234,12 @@
                             <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
                             <Setter Property="Foreground" Value="{DynamicResource TextOnAccentBrush}" />
                         </Trigger>
+                        <!-- 卡片正拖到这枚分组 Tab 上：底色提亮、描边走 accent，落点必须一眼看得见 -->
+                        <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                            <Setter TargetName="Shell" Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+                            <Setter TargetName="Shell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+                        </DataTrigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
