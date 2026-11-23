@@ -178,7 +178,7 @@ public partial class App : Application
         VerifyCommandBindings(dock, "Dock");
         VerifyMenuStyle(dock, "Dock 图标", "smoke-menu-dock.png");
         await VerifyPreviewCloseAsync(services.GetRequiredService<WindowPreviewWindow>(), services.GetRequiredService<DockViewModel>());
-        await VerifyDockDragFeedbackAsync(dock);
+        VerifyDockIconRoom(dock, services.GetRequiredService<DockViewModel>());
 
         // 遮罩没有按钮，但它同样是分层置顶窗口：确认它能显示、能定位、能收回去。
         // 填充改成后台线程按帧差取了，所以要等一拍再问「画上壁纸了没有」，并看一眼实际节奏。
@@ -225,6 +225,8 @@ public partial class App : Application
         await VerifyKeyboardFocusAsync(folders, folderVm);
         VerifyTabDropTargets(folders, folderVm);
         await VerifyCardFootprintAsync(folders, folderVm);
+        await VerifyCardLayoutAsync(folders, folderVm);
+        await VerifyPathBoxAsync(folders, folderVm);
         await VerifyFileContentAsync(folders, folderVm, services.GetRequiredService<FilePreviewWindow>());
         await VerifyPreviewFollowsContextAsync(folders, folderVm);
         await VerifyCardColumnsAsync(folders, folderVm);
@@ -236,6 +238,9 @@ public partial class App : Application
             VerifyTileMenus(folders, $"桌面文件 · {tab.Name}");
             VerifyCommandBindings(folders, $"桌面文件归类 · {tab.Name}");
         }
+
+        // 类型图标是后台取的：等它真落到渲染出来的 Image 上再判，并截图存证。
+        await VerifyTypeIconsAsync(folders, folderVm);
 
         folderVm.SelectTabCommand.Execute(folderVm.Tabs[0]);
 
@@ -251,6 +256,10 @@ public partial class App : Application
 
         await VerifyOpenCloseAsync(folders);
         await VerifyOpenCloseRaceAsync(folders);
+
+        // 开场动画的回归锁：淡入要被一帧帧画出来，不是「最后不透明度到了 1」就算过。
+        await VerifyOpenAnimationAsync("文件夹管理", folders, folders.ShowManager, () => folders.Close());
+        await VerifyOpenAnimationAsync("启动台", launcher, launcher.ShowLauncher, launcher.HideLauncher);
 
         var searchWindow = services.GetRequiredService<SearchWindow>();
         await ShowAndRecord("搜索", () => searchWindow.Present());
@@ -269,6 +278,9 @@ public partial class App : Application
         SaveWindowProof(searchWindow, "smoke-search.png");
         searchVm.Keyword = string.Empty;
         await ShowAndRecord("设置", () => services.GetRequiredService<SettingsWindow>().ShowSettings());
+        await VerifyDockIconPresetsAsync(
+            services.GetRequiredService<SettingsWindow>(),
+            services.GetRequiredService<DockViewModel>());
 
         // 托盘菜单现在背着「搜索」这个兜底入口，菜单项的命令必须逐条验：
         // 绑定路径写错既不编译失败也不抛异常，只会点下去毫无反应。
@@ -390,6 +402,115 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// 开场动画的回归锁：淡入要被一帧一帧画出来，不是「最后不透明度到了 1」就算过。
+    /// <para>
+    /// 一次 130~300ms 的 UI 线程停顿砸在动画中间时，动画照样在几百毫秒内收到 1.0，
+    /// 人看到的却是一次「啪」（用户报的「打开很僵硬、卡卡的」）。只看窗口可见性查不出来，
+    /// 所以这里数淡入期间出现过几档不同的不透明度：本机顺的时候 19~28 档，被整段吃掉时只剩 2~4 档。
+    /// </para>
+    /// </summary>
+    private async Task VerifyOpenAnimationAsync(string name, Window window, Action show, Action hide)
+    {
+        var panel = (FrameworkElement)window.Content;
+        var steps = new HashSet<double>();
+        var gaps = new List<double>();
+        var settled = false;
+        var last = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        void OnRendering(object? sender, EventArgs e)
+        {
+            if (settled)
+            {
+                return;
+            }
+
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var level = Math.Round(window.Opacity * panel.Opacity, 2);
+
+            // 分层窗口淡的是整窗，普通窗口淡的是内容层：两个乘起来才是屏幕上看到的那一档。
+            steps.Add(level);
+            if (level >= 0.99)
+            {
+                settled = true;
+                return;
+            }
+
+            gaps.Add(System.Diagnostics.Stopwatch.GetElapsedTime(last, now).TotalMilliseconds);
+            last = now;
+        }
+
+        CompositionTarget.Rendering += OnRendering;
+        show();
+        await Task.Delay(500);
+        CompositionTarget.Rendering -= OnRendering;
+        hide();
+        await Task.Delay(400);
+
+        var worst = gaps.Count > 0 ? gaps.Max() : 0;
+        Log.Information(
+            "开场动画 · {Name}：淡入画出 {Steps} 档不透明度，最大帧间隔 {Worst:F0}ms",
+            name,
+            steps.Count,
+            worst);
+
+        if (steps.Count < 8)
+        {
+            SmokeFail(
+                $"{name} 的开场动画没跑起来：淡入只画出 {steps.Count} 档（顺的时候 19~28 档）。" +
+                "多半是首帧布局、整片条目重建或模糊这类贵活压在动画中间，把动画整段吃掉了");
+        }
+        else if (worst > 90)
+        {
+            SmokeFail($"{name} 的开场动画中间空了 {worst:F0}ms —— 淡入期间一帧都不该断到 90ms 以上");
+        }
+    }
+
+    /// <summary>
+    /// 文件类型图标的回归锁：面板里的行与卡片要画 Windows 对这一类的默认图标（文件夹 / Word / PDF / …），
+    /// 不能整页一个字形或一个角标框。图标是后台异步取的，所以判据是「渲染出来的 Image.Source 落上了值」，
+    /// 而不是视图模型里的属性 —— 绑定写错时属性是对的、屏幕上是空的。
+    /// </summary>
+    private async Task VerifyTypeIconsAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
+    {
+        foreach (var tab in viewModel.Tabs.Where(tab => DesktopFileRules.IsCategoryTab(tab.Id)).ToList())
+        {
+            viewModel.SelectTab(tab);
+            window.UpdateLayout();
+
+            if (viewModel.DesktopFiles.Count == 0)
+            {
+                continue;
+            }
+
+            Image? painted = null;
+            for (var tick = 0; tick < 40 && painted is null; tick++)
+            {
+                await Task.Delay(50);
+                window.UpdateLayout();
+                painted = Descendants(window)
+                    .OfType<Image>()
+                    .FirstOrDefault(image => image.IsVisible
+                                             && image.DataContext is DesktopFileItemViewModel
+                                             && image.Source is not null);
+            }
+
+            if (painted is null)
+            {
+                SmokeFail($"桌面分类「{tab.Name}」的文件卡片没画上类型图标：Image.Source 一直是空的");
+                continue;
+            }
+
+            Log.Information("类型图标 · {Tab}：{Count} 张卡片画上了 Shell 图标", tab.Name, viewModel.DesktopFiles.Count);
+            SaveWindowProof(window, $"smoke-type-icons-{tab.Id.Replace(':', '-')}.png");
+
+            // 同一套模板，验到一个有文件的分类就够。
+            return;
+        }
+
+        Log.Warning("类型图标校验跳过：桌面上一个分类文件都没有");
+    }
+
+    /// <summary>
     /// 「关掉的同时马上再呼出」这个竞态。用户最初报的「关了还剩一个空壳窗口」就是它：
     /// 淡出收尾只挂在动画 Completed 上，重新呼出时新时钟把旧的换掉，Completed 永远不来。
     /// 现在关闭不再等动画，但这条仍要验 —— 它保证快速开关之后界面是完整的、也关得掉。
@@ -422,21 +543,174 @@ public partial class App : Application
     /// </summary>
 
     /// <summary>
-    /// 拖拽反馈的现场校验：被拿起的那一枚要变半透明、插入指示线要显示在指定缝隙上。
-    /// 合成输入在这台机器上起不了 OLE 拖拽循环，所以改成把那个状态直接摆出来再截图。
+    /// 悬停放大不许被 Dock 裁头：图标是<b>底对齐向上</b>长的（RenderTransformOrigin 0.5,1），
+    /// 而窗口按布局尺寸裁内容。量的是屏幕上「图标上沿到窗口上沿」够不够那一截生长量 ——
+    /// 不读 XAML 里写了多少边距：边距是绑出来的，绑错或算错只有渲染结果看得见。
     /// </summary>
-    private async Task VerifyDockDragFeedbackAsync(DockWindow dock)
+    private void VerifyDockIconRoom(DockWindow dock, DockViewModel viewModel)
     {
-        dock.ShowDragFeedbackForSelfCheck(2);
-        await Task.Delay(250);
-
-        if (!dock.IsDropIndicatorVisible)
+        if (viewModel.IsVertical)
         {
-            SmokeFail("拖拽插入指示线没显示出来");
+            Log.Information("Dock 悬停余量跳过：竖着贴边时向上生长落在条内，不吃窗口上沿");
+            return;
         }
 
-        SaveWindowProof(dock, "smoke-dock-drag.png");
-        dock.HideDragFeedbackForSelfCheck();
+        var glyph = Descendants(dock)
+            .OfType<Button>()
+            .FirstOrDefault(button => button.DataContext is DockItemViewModel && button.IsVisible);
+
+        if (glyph is null)
+        {
+            Log.Warning("Dock 悬停余量跳过：Dock 上没有可见图标");
+            return;
+        }
+
+        var room = glyph.TransformToVisual(dock).Transform(new Point(0, 0)).Y;
+        var need = viewModel.HoverGrowth;
+
+        if (room + 0.5 < need)
+        {
+            SmokeFail($"悬停放大会被裁头：图标边长 {viewModel.IconSize:F0} 要向上长 {need:F1}，头顶只有 {room:F1}");
+        }
+        else
+        {
+            Log.Information(
+                "Dock 悬停余量通过：图标 {Size:F0} · 头顶 {Room:F1} ≥ 生长量 {Need:F1}",
+                viewModel.IconSize,
+                room,
+                need);
+        }
+    }
+
+    /// <summary>
+    /// 设置页「小 / 中 / 大」三档真按得动：命令解析得到、点下去 Dock 跟着换尺寸、
+    /// 亮着的那一枚永远对应当前值（停在 37 这种非档位值时必须一颗都不亮，不能乱亮）。
+    /// 自检不许把现场留在自己选的档位上，最后按回用户原来的值。
+    /// </summary>
+    private async Task VerifyDockIconPresetsAsync(SettingsWindow window, DockViewModel dock)
+    {
+        window.ShowSettings();
+        window.UpdateLayout();
+
+        // 「Dock 细节」在外观那一页，默认打开的是通用页 —— 不先切过去，三颗档位压根还没画出来。
+        var appearanceNav = Descendants(window)
+            .OfType<RadioButton>()
+            .FirstOrDefault(element => element.Content as string == "外观");
+
+        if (appearanceNav is null || appearanceNav.Command is null)
+        {
+            SmokeFail("设置页的「外观」导航找不到或命令解析不到（静默的点了没反应）");
+            return;
+        }
+
+        TapRadioButton(appearanceNav);
+        window.UpdateLayout();
+
+        if (appearanceNav.IsChecked != true)
+        {
+            SmokeFail("走了「外观」导航那条命令之后页面没切过去（IsChecked 或分页的可见性绑定没跟上）");
+            return;
+        }
+
+        var tags = new[] { "32", "44", "60" };
+
+        var pills = Descendants(window)
+            .OfType<RadioButton>()
+            .Where(element => element.IsVisible
+                              && element.CommandParameter is string tag
+                              && tags.Contains(tag, StringComparer.Ordinal))
+            .ToList();
+
+        if (pills.Count != tags.Length)
+        {
+            // 把页面上真的画出来的单选都列出来：分不清「没切到外观页」还是「档位压根没画」。
+            var seen = string.Join(" / ", Descendants(window)
+                .OfType<RadioButton>()
+                .Select(element => $"{element.Content}|参数={element.CommandParameter}|可见={element.IsVisible}"));
+
+            SmokeFail($"设置页的图标档位画出了 {pills.Count} 颗，应该有 3 颗（小 / 中 / 大）。当前页面上的单选：{seen}");
+            return;
+        }
+
+        // 命令经祖先/绑定解析：路径写错既不编译失败也不抛异常，只是点下去没反应。
+        if (pills.Any(element => element.Command is null))
+        {
+            SmokeFail("图标档位里有按钮的命令解析不到（静默的点了没反应）");
+            return;
+        }
+
+        var original = (int)Math.Round(dock.IconSize);
+        var settings = (SettingsViewModel)window.DataContext;
+
+        // ① 点「大」：这一颗自己要亮，且 Dock 的图标边长真的换过来（配置 → ConfigChanged → Dock）。
+        var large = pills.Single(element => (string)element.CommandParameter! == "60");
+        TapRadioButton(large);
+        window.UpdateLayout();
+
+        if (large.IsChecked != true)
+        {
+            SmokeFail("执行「大」之后这一颗没亮：IsChecked 与当前值的相等绑定没跟上");
+            return;
+        }
+
+        if (!await WaitForDockIconSizeAsync(dock, 60))
+        {
+            SmokeFail($"点「大」之后 Dock 没换成 60（现在 {dock.IconSize:F0}）");
+        }
+        else if (pills.Count(element => element.IsChecked == true) != 1)
+        {
+            SmokeFail($"换成 60 之后亮着的档位有 {pills.Count(element => element.IsChecked == true)} 颗，应该只有「大」");
+        }
+
+        // ② 停在非档位值（37）时一颗都不亮 —— 判的是「当前值等于这一档」，不是「最后点过哪颗」。
+        settings.DockIconSize = 37;
+        window.UpdateLayout();
+
+        if (pills.Any(element => element.IsChecked == true))
+        {
+            SmokeFail("图标大小停在 37（不在三档上），设置页却还亮着某一档");
+        }
+
+        // ③ 回到用户原来的那一格，自检不留现场。
+        settings.DockIconSize = original;
+
+        if (!await WaitForDockIconSizeAsync(dock, original))
+        {
+            SmokeFail($"自检收尾没把图标大小还回 {original}（现在 {dock.IconSize:F0}）");
+        }
+        else
+        {
+            Log.Information("Dock 图标档位校验通过：点「大」→ 60 真的换过来，非档位值不乱亮，现场已还回 {Size}", original);
+        }
+
+        // 设置页停在自检切过去的那一格不好看，按回默认页。
+        var generalNav = Descendants(window)
+            .OfType<RadioButton>()
+            .FirstOrDefault(element => element.Content as string == "通用");
+
+        if (generalNav is not null)
+        {
+            TapRadioButton(generalNav);
+        }
+    }
+
+    /// <summary>
+    /// 让一颗单选钮走它自己绑好的命令。
+    /// 这台机器上合成的鼠标推不动 ToggleButton：按下那一下拿不到鼠标捕获，抬起因此不翻勾、
+    /// Command 也不触发（自检里按下+抬起两下都发过，页面照样不切）。所以执行命令本身 ——
+    /// 和真点下去是同一个出口；命令绑定写错解析不到，上面那条判空会先拦下来。
+    /// </summary>
+    private static void TapRadioButton(RadioButton target) => target.Command!.Execute(target.CommandParameter);
+
+    private static async Task<bool> WaitForDockIconSizeAsync(DockViewModel dock, double expected)
+    {
+        // 滑条与档位都是「防抖之后才落盘」，Dock 收到的是配置变更事件，不是属性本身。
+        for (var tick = 0; tick < 60 && Math.Abs(dock.IconSize - expected) >= 0.5; tick++)
+        {
+            await Task.Delay(50);
+        }
+
+        return Math.Abs(dock.IconSize - expected) < 0.5;
     }
 
     /// <summary>
@@ -923,17 +1197,16 @@ public partial class App : Application
                 var clicked = (FavoriteCardViewModel)favoriteShell.DataContext;
                 var clickedDirectory = Directory.Exists(clicked.FullPath);
 
-                if (!viewModel.IsBrowsing)
+                // 判的是「这一下有没有反应」，而反应长什么样取决于收藏的是目录还是文件：
+                // 目录 → 主区走进它列内部；文件 → 只开右边内容窗格，左边仍是收藏页（下一步 ② 专门钉这条）。
+                // 以前这里先问一句「IsBrowsing 没有」，收藏的第一张换成文件就把自己判成失败。
+                if (clickedDirectory && (!viewModel.IsBrowsing || !SamePath(viewModel.BrowsePath, clicked.FullPath)))
                 {
-                    SmokeFail("单击收藏卡片没有反应：既没进入那个文件夹，也没打开内容窗格");
+                    SmokeFail($"单击收藏的目录「{clicked.Title}」没列出它自己（主区现在在「{viewModel.BrowsePath}」，IsBrowsing={viewModel.IsBrowsing}）");
                 }
-                else if (clickedDirectory && !SamePath(viewModel.BrowsePath, clicked.FullPath))
+                else if (!clickedDirectory && (!window.PreviewPanel.IsVisible || window.PreviewPanel.ActualWidth < 200))
                 {
-                    SmokeFail($"单击收藏的目录没列出它自己（主区现在在「{viewModel.BrowsePath}」）");
-                }
-                else if (!clickedDirectory && window.PreviewPanel.ActualWidth < 200)
-                {
-                    SmokeFail("单击收藏的文件没出内容窗格");
+                    SmokeFail($"单击收藏的文件「{clicked.Title}」没开内容窗格（宽度 {window.PreviewPanel.ActualWidth:F0}）");
                 }
                 else
                 {
@@ -1756,7 +2029,8 @@ public partial class App : Application
 
     /// <summary>
     /// 卡片副标题的信息密度：最后修改时间要默认就在，总大小必须等用户问了才有
-    /// （默认算是「一打开面板就卡一下」的成因）。量的是屏幕上真的画出来的文字。
+    /// （默认算是「一打开面板就卡一下」的成因），而且不许再出现「N 个文件」那一行 ——
+    /// 那个数要把整棵树走一遍，用户明确说不用显示。量的是屏幕上真的画出来的文字。
     /// </summary>
     private async Task VerifyCardFootprintAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
     {
@@ -1768,8 +2042,8 @@ public partial class App : Application
             return;
         }
 
-        // 条目数与修改时间是后台逐张填的（首屏不并发扫盘），先等这一张落定，最多 5 秒。
-        for (var tick = 0; tick < 100 && card.IsCountLoading; tick++)
+        // 时间是后台逐张 stat 回来的（一次一个目录，不并发扫盘），先等这一张落定，最多 5 秒。
+        for (var tick = 0; tick < 100 && string.IsNullOrEmpty(card.ModifiedText); tick++)
         {
             await Task.Delay(50);
         }
@@ -1788,10 +2062,24 @@ public partial class App : Application
             SmokeFail($"卡片上的最后修改时间「{card.ModifiedText}」没画到屏幕上");
         }
 
+        if (texts.Any(text => text.Contains("个文件") || text == "统计中…"))
+        {
+            SmokeFail("卡片上又出现了文件数那一行：那个数要遍历整棵树，屏幕上没人看它，白扫");
+        }
+
+        // 完整路径只写在地址栏那一格（卡片上悬停有 ToolTip、右键有「复制路径」），卡片里不再占一行。
+        if (texts.Any(text => text.Contains(card.RealPath, StringComparison.Ordinal)))
+        {
+            SmokeFail($"卡片上又画出了完整路径「{card.RealPath}」：这一行用户说没必要，地址栏已经写了同一条");
+        }
+
         if (card.HasSize)
         {
             SmokeFail("还没人问过大小，卡片就已经在称重了（默认算会拖慢首屏）");
         }
+
+        // 留一张「默认长什么样」的证据：只有名字 + 左下角日期，路径那行已经去掉（用户说没必要）。
+        SaveWindowProof(window, "smoke-card-default.png");
 
         // 问一下：算完要真出现在那一行里。
         await card.MeasureSizeAsync();
@@ -1815,13 +2103,360 @@ public partial class App : Application
             else
             {
                 Log.Information(
-                    "卡片足迹校验通过：默认显示「{Count} · {Modified}」，问过之后加上「{Size}」",
-                    card.CountText,
+                    "卡片足迹校验通过：默认只显示时间「{Modified}」，问过之后加上「{Size}」",
                     card.ModifiedText,
                     card.SizeLine);
             }
         }
     }
+
+    /// <summary>
+    /// 版式回归锁：三种卡片（文件夹 / 桌面分类 / 收藏）的「大小 · 时间」那一行都必须落在**卡片左下角**，
+    /// 和右下角那颗 ☆/★ 同一条水平线。翻不同页面时眼睛不该重新学一次「信息在哪」。
+    /// 判的是屏幕上真实量出来的偏移（<c>TransformToVisual</c>），不是 XAML 里写了什么对齐 ——
+    /// 局部属性压住样式那一类坑，只有渲染结果看得见。
+    /// </summary>
+    private async Task VerifyCardLayoutAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
+    {
+        var card = viewModel.Cards.FirstOrDefault(item => item.IsValid && item.ModifiedText.Length > 0);
+
+        if (card is null)
+        {
+            Log.Warning("版式校验跳过：没有已经取到日期的文件夹卡片");
+        }
+        else
+        {
+            VerifyMetaAtCardBottomLeft("文件夹卡片", window.CardsHost, card, text => text == card.ModifiedText, card.ModifiedText);
+        }
+
+        // 桌面分类：挑第一个真有文件的分类。
+        foreach (var tab in viewModel.Tabs.Where(tab => DesktopFileRules.IsCategoryTab(tab.Id)).ToList())
+        {
+            viewModel.SelectTab(tab);
+            window.UpdateLayout();
+
+            var file = viewModel.DesktopFiles.FirstOrDefault();
+
+            if (file is null)
+            {
+                continue;
+            }
+
+            VerifyMetaAtCardBottomLeft(
+                "桌面分类卡片",
+                window.DesktopHost,
+                file,
+                text => text.Contains(file.ModifiedText),
+                $"{file.SizeText} · {file.ModifiedText}");
+            break;
+        }
+
+        // 收藏页：详情是后台填的，等到它真写出日期再量。
+        var favoritesTab = viewModel.Tabs.FirstOrDefault(tab => tab.Name.StartsWith("★ 收藏"));
+
+        if (favoritesTab is not null)
+        {
+            viewModel.SelectTab(favoritesTab);
+
+            FavoriteCardViewModel? favorite = null;
+            for (var tick = 0; tick < 40 && favorite is null; tick++)
+            {
+                await Task.Delay(50);
+                window.UpdateLayout();
+                favorite = viewModel.FavoriteCards.FirstOrDefault(
+                    item => item.IsValid && System.Text.RegularExpressions.Regex.IsMatch(item.MetaText, @"\d{4}-\d{2}-\d{2}"));
+            }
+
+            if (favorite is null)
+            {
+                Log.Warning("版式校验跳过：收藏页没有读到日期的卡片");
+            }
+            else
+            {
+                VerifyMetaAtCardBottomLeft("收藏卡片", window.FavoritesHost, favorite, text => text == favorite.MetaText, favorite.MetaText);
+
+                // 收藏卡以前在名字下面还写了一行「所在目录」，和文件夹卡片那行完整路径是同一件事 ——
+                // 路径归地址栏那一格（选中哪条写哪条），卡片上只留名字与日期。
+                if (window.FavoritesHost.ItemContainerGenerator.ContainerFromItem(favorite) is FrameworkElement container)
+                {
+                    var parent = System.IO.Path.GetDirectoryName(favorite.FullPath.TrimEnd('\\', '/')) ?? string.Empty;
+
+                    if (parent.Length > 0 && PaintedTexts(container).Any(text => text == parent))
+                    {
+                        SmokeFail($"收藏卡片又画出了「所在目录」那一行（{parent}）：这一行用户说没必要，路径看地址栏、悬停也有 ToolTip");
+                    }
+                }
+            }
+        }
+
+        // 后面的步骤默认停在「全部」那一页。
+        viewModel.SelectTab(viewModel.Tabs[0]);
+        window.UpdateLayout();
+    }
+
+    /// <summary>
+    /// 一个 TextBlock 在屏幕上真正写出来的字。
+    /// <c>TextBlock.Text</c> 对「多个 Run 拼出来的一行」返回空串（桌面分类那行「大小 · 日期」就是这样），
+    /// 所以逐字比对会把正常渲染判成「没找到」—— 第一版就栽在这里。要读 <c>Inlines</c>。
+    /// </summary>
+    private static string RenderedText(TextBlock block)
+    {
+        if (block.Text.Length > 0)
+        {
+            return block.Text;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        foreach (var inline in block.Inlines)
+        {
+            if (inline is System.Windows.Documents.Run run)
+            {
+                builder.Append(run.Text);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// 一个卡片容器里真正画到屏幕上的文字（跳过不可见与空串）。
+    /// 「卡片上不该再出现某一行」这种反向断言只能读渲染结果 —— XAML 里删干净了，绑定回来照样在。
+    /// </summary>
+    private static List<string> PaintedTexts(FrameworkElement container)
+        => Descendants(container)
+            .OfType<TextBlock>()
+            .Where(text => text.IsVisible)
+            .Select(RenderedText)
+            .Where(text => text.Length > 0)
+            .ToList();
+
+    /// <summary>
+    /// 把「那一行在卡片左下角」量出来：横向在左半边、纵向落到下半部。
+    /// 匹配用谓词而不是整串相等 —— 分隔符是全角空格，逐字比对容易自己写错。
+    /// </summary>
+    private void VerifyMetaAtCardBottomLeft(string area, ItemsControl host, object item, Func<string, bool> matches, string label)
+    {
+        if (host.ItemContainerGenerator.ContainerFromItem(item) is not FrameworkElement container)
+        {
+            SmokeFail($"{area}：拿不到「{label}」这一行的容器，版式没法量（列表没铺出来？）");
+            return;
+        }
+
+        var painted = PaintedTexts(container);
+
+        var meta = Descendants(container)
+            .OfType<TextBlock>()
+            .FirstOrDefault(text => text.IsVisible && matches(RenderedText(text)));
+
+        if (meta is null)
+        {
+            SmokeFail($"{area}：卡片上没找到「{label}」那一行（这一张画出来的是：{string.Join(" / ", painted)}）");
+            return;
+        }
+
+        var at = meta.TransformToVisual(container).Transform(new Point(0, 0));
+        var where = $"{at.X:F0},{at.Y:F0} 行宽 {meta.ActualWidth:F0} / 卡片 {container.ActualWidth:F0}x{container.ActualHeight:F0}";
+
+        if (container.ActualWidth < 1 || container.ActualHeight < 1)
+        {
+            SmokeFail($"{area}：卡片容器没有尺寸，量不了位置");
+        }
+        else if (at.X >= container.ActualWidth / 2)
+        {
+            SmokeFail($"{area}：「{label}」没落在左半边（{where}）");
+        }
+        else if (at.Y + meta.ActualHeight <= container.ActualHeight / 2)
+        {
+            SmokeFail($"{area}：「{label}」没贴到卡片下半部（{where}）");
+        }
+        else
+        {
+            Log.Information("版式校验通过 · {Area}：「{Text}」落在卡片左下角（{Painted}）", area, label, where);
+        }
+    }
+
+    /// <summary>
+    /// 地址栏那一格（对齐资源管理器）：画得出来、点一下能编辑、粘进去回车走得通、
+    /// 走完换回面包屑、Esc 退得出去、框里的字拿得走，而且人在打字时现场刷新不许盖掉他写的字。
+    /// <para>
+    /// 每一步都走真实交互（在格子上升鼠标事件、在输入框上升按键），不直接调视图模型的命令 ——
+    /// 「命令能跑通但那一格根本没接上」正是这类校验唯一要防的事。
+    /// </para>
+    /// </summary>
+    private async Task VerifyPathBoxAsync(FolderManagerWindow window, FolderManagerViewModel viewModel)
+    {
+        if (viewModel.IsBrowsing)
+        {
+            viewModel.ClosePreview();
+        }
+
+        var card = viewModel.Cards.FirstOrDefault(item => item.IsValid);
+        var source = PresentationSource.FromVisual(window);
+
+        if (card is null || source is null)
+        {
+            Log.Warning("地址栏校验跳过：没有有效卡片，或窗口还没有呈现源");
+            return;
+        }
+
+        window.UpdateLayout();
+        await Task.Delay(150);
+
+        if (!window.AddressBar.IsVisible || window.AddressBar.ActualWidth < 200)
+        {
+            SmokeFail($"地址栏没画出来或太窄：可见={window.AddressBar.IsVisible}，宽={window.AddressBar.ActualWidth:F0}");
+            return;
+        }
+
+        // 没在浏览时这一格是「一格文本」：显示焦点那条的路径，输入框收着。
+        // 先把焦点定在这张卡上 —— 不定的话框里写的是别的卡片，断言就成了看运气。
+        viewModel.SetFocus(card);
+        window.UpdateLayout();
+
+        if (viewModel.IsPathBoxEditing)
+        {
+            SmokeFail("还没点它，这一格就已经是编辑态了（两态没分开）");
+        }
+        else if (!RenderedTexts(window.AddressBar).Contains(card.RealPath))
+        {
+            SmokeFail($"没在浏览时这一格没写出焦点卡片的路径：{string.Join(" / ", RenderedTexts(window.AddressBar))}");
+            return;
+        }
+
+        var notices = new List<string>();
+        void OnNotice(object? sender, NoticeEventArgs args) => notices.Add(args.Message);
+
+        viewModel.UserNotice += OnNotice;
+        try
+        {
+            // 1. 点这一格 → 转成可编辑。
+            Click(window.AddressBar);
+            window.UpdateLayout();
+
+            if (!viewModel.IsPathBoxEditing || !ReferenceEquals(Keyboard.FocusedElement, window.PathBox))
+            {
+                SmokeFail("点地址栏没转成可编辑（编辑态没跟上，或焦点没落到输入框里）");
+                return;
+            }
+
+            // 2. 粘一个目录进去，按回车：必须真走进这一层，并且那一格换回面包屑。
+            window.PathBox.Text = card.RealPath;
+            RaiseKeyOn(window.PathBox, Key.Enter, source);
+            window.UpdateLayout();
+
+            if (!viewModel.IsBrowsing)
+            {
+                SmokeFail($"回车没走进「{card.RealPath}」（还停在卡片网格）");
+            }
+            else if (viewModel.IsPathBoxEditing)
+            {
+                SmokeFail("跳完没退出编辑态：资源管理器回车之后是换回面包屑的");
+            }
+            else if (!Descendants(window.AddressBar).OfType<Button>().Any(button => button.IsVisible))
+            {
+                SmokeFail("跳完之后面包屑没画出来（这一格空了）");
+            }
+            else
+            {
+                Log.Information("地址栏校验通过 · 点开→粘路径→回车走进「{Path}」，之后换回面包屑", card.RealPath);
+            }
+
+            // 3. 复制：剪贴板里要真取得回同一条路径。
+            viewModel.CopyPathBoxCommand.Execute(null);
+            var clip = System.Windows.Clipboard.GetText();
+
+            if (clip != card.RealPath)
+            {
+                SmokeFail($"点「复制」之后剪贴板里是「{clip}」，不是这一格里的「{card.RealPath}」");
+            }
+
+            // 4. 不存在的目标：说清是哪条路径，并且不许把人丢进一个空层。
+            var bogus = Path.Combine(card.RealPath, "这东西不存在-8f2c.txt");
+            Click(window.AddressBar);
+            window.PathBox.Text = bogus;
+            RaiseKeyOn(window.PathBox, Key.Enter, source);
+
+            if (!notices.Any(message => message.Contains("不存在") && message.Contains(bogus, StringComparison.Ordinal)))
+            {
+                SmokeFail($"粘了一条不存在的路径，却没说清是哪条：{string.Join(" / ", notices)}");
+            }
+            else if (!viewModel.IsBrowsing || !SamePath(viewModel.BrowsePath, card.RealPath))
+            {
+                SmokeFail($"一条打不开的路径把界面从「{card.RealPath}」带离了（现在 IsBrowsing={viewModel.IsBrowsing}）");
+            }
+
+            // 5. Esc 退得出编辑。
+            Click(window.AddressBar);
+
+            if (!viewModel.IsPathBoxEditing)
+            {
+                SmokeFail("第二次点地址栏没再进编辑态");
+            }
+
+            RaiseKeyOn(window.PathBox, Key.Escape, source);
+            window.UpdateLayout();
+
+            if (viewModel.IsPathBoxEditing)
+            {
+                SmokeFail("按 Esc 没退出编辑态");
+            }
+
+            // 6. 打字期间不许被现场刷新盖掉；失焦之后要立刻补回当前语境。
+            //    失焦得交给一个真拿得住焦点的控件：Keyboard.Focus(window) 在这台机器上根本不换手。
+            Click(window.AddressBar);
+            viewModel.PathBoxText = @"E:\Desktop\打到一半的";
+            viewModel.SyncPathBox();
+
+            if (viewModel.PathBoxText != @"E:\Desktop\打到一半的")
+            {
+                SmokeFail($"编辑期间这一格被盖掉了：现在写着「{viewModel.PathBoxText}」");
+            }
+
+            window.SearchBox.Focus();
+            Keyboard.Focus(window.SearchBox);
+            window.UpdateLayout();
+
+            if (ReferenceEquals(Keyboard.FocusedElement, window.PathBox))
+            {
+                SmokeFail("自检没能把焦点从地址栏移走（这条校验没跑到，别当成产品问题）");
+            }
+            else if (viewModel.IsPathBoxEditing)
+            {
+                SmokeFail("焦点已经离开地址栏，视图模型还当人在打字");
+            }
+            else if (!viewModel.PathBoxText.Contains(System.IO.Path.GetFileName(card.RealPath), StringComparison.OrdinalIgnoreCase))
+            {
+                SmokeFail($"失焦之后没回到当前这一层：「{viewModel.PathBoxText}」");
+            }
+            else
+            {
+                Log.Information("地址栏校验通过 · 编辑期间不被盖，Esc 与失焦都换回面包屑（{Path}）", viewModel.PathBoxText);
+            }
+        }
+        finally
+        {
+            viewModel.UserNotice -= OnNotice;
+            viewModel.ClosePreview();
+        }
+    }
+
+    /// <summary>在某个元素上升一次「左键抬起」，走界面那条真的点击链路。</summary>
+    private static void Click(FrameworkElement target)
+        => target.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+        {
+            RoutedEvent = UIElement.MouseLeftButtonUpEvent,
+            Source = target,
+        });
+
+    private static void RaiseKeyOn(UIElement target, Key key, PresentationSource source)
+        => target.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, key)
+        {
+            RoutedEvent = UIElement.KeyDownEvent,
+        });
+
+    /// <summary>那一格里真写出来的文字（含面包屑段与文本态）。</summary>
+    private static List<string> RenderedTexts(FrameworkElement root)
+        => Descendants(root).OfType<TextBlock>().Select(RenderedText).Where(text => text.Length > 0).ToList();
 
     /// <summary>
     /// 拖卡片到分组 Tab 归组：真拖拽在这台机器上合成不出来（WPF 不进 DoDragDrop），
@@ -2477,9 +3112,12 @@ public partial class App : Application
         services.AddSingleton<TrayViewModel>();
         services.AddSingleton<TrayWindow>();
 
+        services.AddSingleton<MediaSmtcWatcher>();
+
         services.AddSingleton<DockViewModel>();
         services.AddSingleton<DockWindow>();
         services.AddSingleton<TaskbarCoverWindow>();
+        services.AddSingleton<TaskbarBarWindow>();
         services.AddSingleton<WindowPreviewWindow>();
 
         services.AddSingleton<LauncherViewModel>();

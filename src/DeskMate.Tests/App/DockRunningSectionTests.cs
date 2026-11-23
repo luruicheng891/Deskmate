@@ -1,4 +1,5 @@
 using System.Windows.Media.Imaging;
+using DeskMate.App.Services;
 using DeskMate.App.ViewModels;
 using DeskMate.Core.Interfaces;
 using DeskMate.Core.Models;
@@ -20,6 +21,9 @@ public sealed class DockRunningSectionTests : IDisposable
     private readonly FakeWindows _windows = new();
     private readonly DockViewModel _dock;
 
+    /// <summary>DockWindow.xaml 里内容条 Chrome 的上内边距：它和 ShellMargin 的上边一起组成图标头顶的余量。</summary>
+    private const double ChromeTopPadding = 6;
+
     public DockRunningSectionTests()
     {
         _config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
@@ -33,7 +37,9 @@ public sealed class DockRunningSectionTests : IDisposable
             _probe,
             _windows,
             new FakeUsage(),
+            new MediaSmtcWatcher(NullLogger<MediaSmtcWatcher>.Instance),
             NullLogger<DockViewModel>.Instance);
+        _dock.MusicWidgetEnabled = false;
     }
 
     [Fact]
@@ -231,6 +237,45 @@ public sealed class DockRunningSectionTests : IDisposable
         Assert.Equal(1, _probe.ReleasedTimes);
     }
 
+    /// <summary>
+    /// 悬停放大是底对齐向上长的，窗口按布局尺寸裁内容：
+    /// 图标头顶够不够那一截生长量，取决于外壳上边距 + 内容条上内边距（XAML 里写的 6）。
+    /// 这一条钉住「调大图标不许被裁头」，边距绑错或余量算错都会在这里露出来。
+    /// </summary>
+    [Theory]
+    [InlineData(AppConfig.DockIconSizeMin)]
+    [InlineData(AppConfig.DockIconSizeMedium)]
+    [InlineData(AppConfig.DockIconSizeMax)]
+    public async Task HoverGrowth_AlwaysFitsInsideTheRoomAboveTheIcon(int size)
+    {
+        _config.Current.DockIconSize = size;
+        await _dock.LoadAsync();
+
+        Assert.True(
+            _dock.ShellMargin.Top + ChromeTopPadding >= _dock.HoverGrowth,
+            $"边长 {size}：头顶只有 {_dock.ShellMargin.Top + ChromeTopPadding:F1}，悬停要向上长 {_dock.HoverGrowth:F1}");
+    }
+
+    /// <summary>竖着贴边时向上生长落在条内（顶多压到上一个图标），不需要额外余量，条子不该凭空变宽。</summary>
+    [Fact]
+    public async Task VerticalDock_KeepsThePlainMargin()
+    {
+        _config.Current.DockIconSize = AppConfig.DockIconSizeMax;
+        await _dock.LoadAsync();
+
+        _dock.IsVertical = true;
+
+        Assert.Equal(8, _dock.ShellMargin.Top);
+    }
+
+    /// <summary>出厂默认就是设置页「中」那一档，两边对不上时用户看到的默认大小和按钮高亮会各说一套。</summary>
+    [Fact]
+    public void DefaultIconSize_IsTheMediumPreset()
+    {
+        Assert.Equal(AppConfig.DockIconSizeMedium, new AppConfig().DockIconSize);
+        Assert.Equal(44, AppConfig.DockIconSizeMedium);
+    }
+
     public void Dispose() => _temp.Dispose();
 
     private sealed class FakeProbe : IProcessProbeService
@@ -296,6 +341,8 @@ public sealed class DockRunningSectionTests : IDisposable
     {
         public Task<BitmapSource?> GetIconAsync(string path, int size = 64) => Task.FromResult<BitmapSource?>(null);
 
+        public Task<BitmapSource?> GetTypeIconAsync(string path, bool isDirectory, int size = 32) => Task.FromResult<BitmapSource?>(null);
+
         public void ClearCache()
         {
         }
@@ -331,6 +378,8 @@ public sealed class DockRunningSectionTests : IDisposable
 
         public Task<bool> SwitchToAsync(string executablePath) => Task.FromResult(false);
 
+        public Task<bool> RestoreFromTrayAsync(string executablePath) => Task.FromResult(false);
+
         public bool Activate(AppWindowInfo window) => false;
 
         public bool Close(AppWindowInfo window) => true;
@@ -344,6 +393,11 @@ public sealed class DockRunningSectionTests : IDisposable
         {
             ClosedPaths.Add(executablePath);
             return Task.FromResult(WindowsPerClose);
+        }
+
+        public Task<int> KillAsync(string executablePath)
+        {
+            return Task.FromResult(0);
         }
     }
 

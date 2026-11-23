@@ -57,6 +57,13 @@ public interface IFolderService
     /// </summary>
     Task<FolderFootprint> MeasureAsync(string path, bool wantSize);
 
+    /// <summary>
+    /// 目录自己的最后修改时间：一次 stat，不遍历树。卡片上那一行日期只要这个，
+    /// 数文件得整棵树走一遍 —— 没人看的数字不值得那个磁盘开销。
+    /// 目录不存在或读不到时返回 <see cref="DateTime.MinValue"/>。
+    /// </summary>
+    Task<DateTime> LastModifiedAsync(string path);
+
     /// <summary>全部分组，按 Order 升序。</summary>
     IReadOnlyList<FolderGroup> GetGroups();
 

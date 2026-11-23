@@ -38,14 +38,29 @@ public class DesktopFileServiceTests : IDisposable
         File.WriteAllText(_temp.File("b.pdf"), "x");
         File.WriteAllText(_temp.File("a.zip"), "x");
         File.WriteAllText(_temp.File("c.png"), "x");
-        File.WriteAllText(_temp.File("d.exe"), "x");
+        File.WriteAllText(_temp.File("d.xyz"), "x");
 
         var files = _service.Refresh();
 
-        Assert.Equal(new[] { "a.zip", "b.pdf", "c.png", "d.exe" }, Names(files));
+        Assert.Equal(new[] { "a.zip", "b.pdf", "c.png", "d.xyz" }, Names(files));
         Assert.Equal(
             new[] { DesktopFileCategory.Archive, DesktopFileCategory.Document, DesktopFileCategory.Image, DesktopFileCategory.Other },
             files.Select(file => file.Category));
+    }
+
+    /// <summary>
+    /// 快捷方式与程序本体不进桌面分类：桌面上那几十枚 .lnk 会把「其他」挤满，
+    /// 而启动本来归启动台与 Dock 管。
+    /// </summary>
+    [Fact]
+    public void Refresh_SkipsLaunchers()
+    {
+        File.WriteAllText(_temp.File("报告.docx"), "x");
+        File.WriteAllText(_temp.File("Google Chrome.lnk"), "x");
+        File.WriteAllText(_temp.File("geek.exe"), "x");
+        File.WriteAllText(_temp.File("内网.url"), "x");
+
+        Assert.Equal(new[] { "报告.docx" }, Names(_service.Refresh()));
     }
 
     [Fact]

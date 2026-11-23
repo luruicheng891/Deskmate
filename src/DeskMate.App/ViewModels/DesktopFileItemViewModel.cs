@@ -1,3 +1,4 @@
+using System.Windows.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DeskMate.Core.Models;
@@ -42,6 +43,23 @@ public sealed partial class DesktopFileItemViewModel : ObservableObject, IFocusa
     /// <summary>键盘焦点在这条上。</summary>
     [ObservableProperty]
     private bool _isFocused;
+
+    /// <summary>Windows 里这一类的默认图标（Word / PDF / Markdown…）；没取回来前界面画扩展名角标占位。</summary>
+    [ObservableProperty]
+    private BitmapSource? _icon;
+
+    /// <summary>取类型图标。建卡时排上；图标服务按扩展名缓存，同类型只问一次 Shell。</summary>
+    public async Task LoadIconAsync(int size)
+    {
+        try
+        {
+            Icon = await _owner.TypeIconAsync(Path, isDirectory: false, size);
+        }
+        catch (Exception)
+        {
+            // 取不到就留角标占位，和启动台「图标没取到画字母」同一口径。
+        }
+    }
 
     string IFocusable.FocusPath => Path;
 

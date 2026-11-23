@@ -23,6 +23,9 @@ public sealed partial class DockItemViewModel : ObservableObject
         _isPinned = isPinned;
     }
 
+    /// <summary>音乐控件标记：Dock 上唯一一个不是「应用」的格子，点击/滚轮语义都不一样。</summary>
+    public bool IsMusicWidget { get; init; }
+
     /// <summary>配置里的稳定 Id。</summary>
     public string Id { get; }
 
@@ -51,6 +54,7 @@ public sealed partial class DockItemViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CloseVisibility))]
+    [NotifyPropertyChangedFor(nameof(KillVisibility))]
     private bool _isRunning;
 
     [ObservableProperty]
@@ -74,11 +78,17 @@ public sealed partial class DockItemViewModel : ObservableObject
     public Visibility InvalidVisibility => IsValid ? Visibility.Collapsed : Visibility.Visible;
 
     /// <summary>悬停文字：把「为什么点它会重新开一个」这种反直觉的行为说在前面。</summary>
-    public string TooltipText => !IsValid
-        ? $"{DisplayName} · 目标已不存在，右键可重新选择目标"
-        : IsHiddenInTray
-            ? $"{DisplayName} · 正在运行，但窗口缩回了托盘 · 点图标会重新打开它"
-            : DisplayName;
+    public string TooltipText => IsMusicWidget
+        ? MusicTooltip
+        : !IsValid
+            ? $"{DisplayName} · 目标已不存在，右键可重新选择目标"
+            : IsHiddenInTray
+                ? $"{DisplayName} · 正在运行，但窗口缩回了托盘 · 点图标会重新打开它"
+                : DisplayName;
+
+    /// <summary>音乐控件的悬停文字：随曲目变化，由 <see cref="DockViewModel"/> 更新。</summary>
+    [ObservableProperty]
+    private string _musicTooltip = "音乐控件 · 有播放器放歌时会显示封面\n单击：暂停 / 播放 · 滚轮：上一首 / 下一首";
 
     [ObservableProperty]
     private double _iconSize = 56;
@@ -100,15 +110,30 @@ public sealed partial class DockItemViewModel : ObservableObject
     /// <summary>「关闭窗口」只对当下真的在跑的图标有意义（一个窗口都没有的话，那是一条点下去没反应的菜单）。</summary>
     public Visibility CloseVisibility => IsRunning ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>「结束进程」与「关闭窗口」同条件出现：没在跑就没有进程可杀。</summary>
+    public Visibility KillVisibility => IsRunning ? Visibility.Visible : Visibility.Collapsed;
+
     partial void OnIsPinnedChanged(bool value)
     {
         OnPropertyChanged(nameof(RemoveVisibility));
         OnPropertyChanged(nameof(PinVisibility));
     }
 
-    /// <summary>左键点击图标：切回已开窗口，没开则启动。</summary>
+    /// <summary>左键点击图标：切回已开窗口，没开则启动；音乐控件则是暂停/播放切换。</summary>
     [RelayCommand]
-    public async Task LaunchAsync() => await _owner.LaunchItemAsync(Id);
+    public async Task LaunchAsync()
+    {
+        if (IsMusicWidget)
+        {
+            await _owner.ToggleMusicAsync();
+            return;
+        }
+
+        await _owner.LaunchItemAsync(Id);
+    }
+
+    /// <summary>滚轮：音乐控件切歌（向上上一首、向下下一首），其它图标不消费滚轮。</summary>
+    public void ScrollMusic(int delta) => _owner.SkipMusic(delta);
 
     /// <summary>右键：把运行中的临时图标钉成固定项。</summary>
     [RelayCommand]
@@ -129,6 +154,10 @@ public sealed partial class DockItemViewModel : ObservableObject
     /// <summary>右键「关闭窗口」：关掉这个应用当前所有窗口，等价于逐个点它们标题栏的 ×。</summary>
     [RelayCommand]
     public Task CloseAsync() => _owner.CloseAllWindowsAsync(Id);
+
+    /// <summary>右键「结束进程」：强制结束这个应用的所有进程，未保存的数据直接丢。</summary>
+    [RelayCommand]
+    public Task KillAsync() => _owner.KillProcessAsync(Id);
 
     /// <summary>右键：目标不在了，重新挑一个。</summary>
     [RelayCommand]

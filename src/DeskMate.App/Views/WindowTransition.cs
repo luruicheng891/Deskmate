@@ -17,9 +17,9 @@ namespace DeskMate.App.Views;
 internal static class WindowTransition
 {
     // 淡入比位移/缩放先结束：内容早点看清，回弹只是收尾的余味。
-    private static readonly TimeSpan FadeDuration = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan FadeDuration = TimeSpan.FromMilliseconds(220);
 
-    private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(340);
+    private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(320);
 
     private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(300);
 
@@ -35,7 +35,7 @@ internal static class WindowTransition
     private const double LauncherCloseDip = 20;
 
     /// <summary>回弹超过 1 的那一小截，换算成缩放；再大就会把面板顶出窗口边界被裁掉。</summary>
-    private const double SpringOvershoot = 0.022;
+    private const double SpringOvershoot = 0.018;
 
     /// <summary>
     /// 启动台。开：以「点下来的那个位置」为锚点缩放长出来 + 轻微上浮 + 淡入，收尾带回弹；
@@ -157,14 +157,20 @@ internal static class WindowTransition
                 EasingFunction = Ease(mode),
             });
 
-    /// <summary>开场：三段回弹（冲过头一点 → 收回来一点 → 落定），眼睛最容易读成「弹性」的就是这个收尾。</summary>
+    /// <summary>
+    /// 开场：冲到目标之外一点，再一口气收回来。
+    /// <para>
+    /// 以前这是四段折线（冲过头 → 收回来 → 落定），两个来回换来的一点点「弹性」只体现在末段 2% 的尺寸上，
+    /// 而每次换向都是眼睛最容易读成「抖」的一刻 —— 出帧一旦掉到十几帧每秒，它就只剩三个硬跳。
+    /// 留一段回弹，收尾是同一个方向，慢下来也不难看。
+    /// </para>
+    /// </summary>
     private static void Spring(IAnimatable target, DependencyProperty property, double from, double to, double overshoot)
     {
         var frames = new DoubleAnimationUsingKeyFrames { Duration = OpenDuration };
         frames.KeyFrames.Add(new EasingDoubleKeyFrame(from, KeyTime.FromPercent(0)) { EasingFunction = Ease(EasingMode.EaseOut) });
-        frames.KeyFrames.Add(new EasingDoubleKeyFrame(to + overshoot, KeyTime.FromPercent(0.62)) { EasingFunction = Ease(EasingMode.EaseInOut) });
-        frames.KeyFrames.Add(new EasingDoubleKeyFrame(to - overshoot * 0.35, KeyTime.FromPercent(0.82)) { EasingFunction = Ease(EasingMode.EaseInOut) });
-        frames.KeyFrames.Add(new EasingDoubleKeyFrame(to, KeyTime.FromPercent(1)));
+        frames.KeyFrames.Add(new EasingDoubleKeyFrame(to + overshoot, KeyTime.FromPercent(0.66)) { EasingFunction = Ease(EasingMode.EaseInOut) });
+        frames.KeyFrames.Add(new EasingDoubleKeyFrame(to, KeyTime.FromPercent(1)) { EasingFunction = Ease(EasingMode.EaseInOut) });
         Run(target, property, frames);
     }
 

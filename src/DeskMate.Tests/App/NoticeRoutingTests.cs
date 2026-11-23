@@ -139,6 +139,28 @@ public sealed class NoticeRoutingTests : IDisposable
         Assert.Contains("文件夹面板", notice.Message);
     }
 
+    /// <summary>
+    /// 设置页「小 / 中 / 大」三档走的是同一条写配置的路：档位值落在可调范围里，
+    /// 范围外的值（或读不成数字的parameter）一律钳住，不许把配置带到滑条够不着的地方。
+    /// </summary>
+    [Fact]
+    public void IconSizePreset_WritesTheChosenSize_AndRefusesToLeaveTheRange()
+    {
+        var config = Config();
+        var settings = Settings(config);
+        settings.LoadFromConfig();
+
+        settings.SetDockIconSizeCommand.Execute("60");
+        Assert.Equal(60, config.Current.DockIconSize);
+        Assert.Equal(60, settings.DockIconSize);
+
+        settings.SetDockIconSizeCommand.Execute("200");
+        Assert.Equal(AppConfig.DockIconSizeMax, config.Current.DockIconSize);
+
+        settings.SetDockIconSizeCommand.Execute("不是数字");
+        Assert.Equal(AppConfig.DockIconSizeMax, config.Current.DockIconSize);
+    }
+
     [Fact]
     public async Task ZeroResults_OpensTwoWaysOut_AndRescanGoesThroughTheShell()
     {
@@ -399,7 +421,7 @@ public sealed class NoticeRoutingTests : IDisposable
         var config = Config();
         var folders = new FolderService(config, NullLogger<FolderService>.Instance);
         var viewModel = new FolderManagerViewModel(
-            folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
+            folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), new FakeIconService(), config, NullLogger<FolderManagerViewModel>.Instance);
 
         var notices = new List<NoticeEventArgs>();
         viewModel.UserNotice += (_, args) => notices.Add(args);
@@ -429,6 +451,7 @@ public sealed class NoticeRoutingTests : IDisposable
         new NoProcessesProbe(),
         new NoWindows(),
         new EmptyUsage(),
+        new MediaSmtcWatcher(NullLogger<MediaSmtcWatcher>.Instance),
         NullLogger<DockViewModel>.Instance);
 
     private static IEnumerable<AppTileViewModel> Tiles(LauncherViewModel launcher)
@@ -496,6 +519,8 @@ public sealed class NoticeRoutingTests : IDisposable
     {
         public Task<BitmapSource?> GetIconAsync(string path, int size = 64) => Task.FromResult<BitmapSource?>(null);
 
+        public Task<BitmapSource?> GetTypeIconAsync(string path, bool isDirectory, int size = 32) => Task.FromResult<BitmapSource?>(null);
+
         public void ClearCache()
         {
         }
@@ -528,11 +553,15 @@ public sealed class NoticeRoutingTests : IDisposable
 
         public Task<bool> SwitchToAsync(string executablePath) => Task.FromResult(false);
 
+        public Task<bool> RestoreFromTrayAsync(string executablePath) => Task.FromResult(false);
+
         public bool Activate(AppWindowInfo window) => false;
 
         public bool Close(AppWindowInfo window) => false;
 
         public Task<int> CloseAllAsync(string executablePath) => Task.FromResult(0);
+
+        public Task<int> KillAsync(string executablePath) => Task.FromResult(0);
     }
 
     private sealed class EmptyUsage : IUsageService

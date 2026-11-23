@@ -68,10 +68,14 @@ public sealed class AppLauncherServiceTests : IDisposable
 
         public Task<bool> SwitchToAsync(string executablePath) => Task.FromResult(false);
 
+        public Task<bool> RestoreFromTrayAsync(string executablePath) => Task.FromResult(false);
+
         public bool Activate(Core.Models.AppWindowInfo window) => false;
 
         public bool Close(Core.Models.AppWindowInfo window) => false;
 
         public Task<int> CloseAllAsync(string executablePath) => Task.FromResult(0);
+
+        public Task<int> KillAsync(string executablePath) => Task.FromResult(0);
     }
 }

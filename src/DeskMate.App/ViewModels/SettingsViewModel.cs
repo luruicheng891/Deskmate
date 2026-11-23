@@ -127,7 +127,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string _dockPosition = "Bottom";
 
     [ObservableProperty]
-    private int _dockIconSize = 56;
+    private int _dockIconSize = AppConfig.DockIconSizeMedium;
 
     [ObservableProperty]
     private int _dockOpacityPercent = 90;
@@ -155,6 +155,14 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>遮罩宽度（DIP）。</summary>
     [ObservableProperty]
     private int _taskbarCoverWidth;
+
+    /// <summary>用自建任务栏顶替系统任务栏（与遮罩互斥）。</summary>
+    [ObservableProperty]
+    private bool _taskbarBarEnabled;
+
+    /// <summary>「保留托盘」模式：把原生任务栏裁到只剩右侧托盘区（与自建任务栏开关配合）。</summary>
+    [ObservableProperty]
+    private bool _taskbarKeepTray;
 
     /// <summary>启动台快捷方式文件夹的生效路径（配置留空时显示默认目录）。</summary>
     public string LaunchpadFolderDisplay => WellKnownPaths.ResolveLaunchpadFolder(LaunchpadFolder);
@@ -191,6 +199,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             DockFlushToEdge = current.DockFlushToEdge;
             TaskbarCoverEnabled = current.TaskbarCoverEnabled;
             TaskbarCoverWidth = current.TaskbarCoverWidth;
+            TaskbarBarEnabled = current.TaskbarBarEnabled;
+            TaskbarKeepTray = current.TaskbarKeepTray;
             LaunchpadFolder = current.LaunchpadFolder;
         }
         finally
@@ -294,6 +304,19 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (!string.IsNullOrWhiteSpace(position))
         {
             DockPosition = position;
+        }
+    }
+
+    /// <summary>
+    /// 「小 / 中 / 大」三档：一键把图标边长拨到某个值。滑条留着做细调，
+    /// 停在某一档时对应的药丸自己会亮（判的是 DockIconSize 这个值，不是「点过没点过」）。
+    /// </summary>
+    [RelayCommand]
+    public void SetDockIconSize(string? size)
+    {
+        if (int.TryParse(size, out var pixels))
+        {
+            DockIconSize = Math.Clamp(pixels, AppConfig.DockIconSizeMin, AppConfig.DockIconSizeMax);
         }
     }
 
@@ -509,6 +532,10 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     partial void OnTaskbarCoverEnabledChanged(bool value) => Apply(() => _config.Current.TaskbarCoverEnabled = value);
 
+    partial void OnTaskbarBarEnabledChanged(bool value) => Apply(() => _config.Current.TaskbarBarEnabled = value);
+
+    partial void OnTaskbarKeepTrayChanged(bool value) => Apply(() => _config.Current.TaskbarKeepTray = value);
+
     partial void OnTaskbarCoverWidthChanged(int value)
     {
         if (_loading)
@@ -592,6 +619,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         target.DockFlushToEdge = source.DockFlushToEdge;
         target.TaskbarCoverEnabled = source.TaskbarCoverEnabled;
         target.TaskbarCoverWidth = source.TaskbarCoverWidth;
+        target.TaskbarBarEnabled = source.TaskbarBarEnabled;
+        target.TaskbarKeepTray = source.TaskbarKeepTray;
         target.DesktopScanPrompted = source.DesktopScanPrompted;
         target.LaunchpadFolder = source.LaunchpadFolder;
         target.HiddenApps = source.HiddenApps;

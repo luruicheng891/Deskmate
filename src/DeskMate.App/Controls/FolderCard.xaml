@@ -50,16 +50,27 @@
                     Visibility="{Binding Color, Converter={StaticResource NullToVis}, ConverterParameter=invert}" />
 
             <Grid Grid.Column="1">
+                <!-- 卡片上不再写完整路径：这一格的信息已经由地址栏承担（选中哪张就写哪张的完整路径），
+                     悬停有 ToolTip，右键有「复制路径」。整张卡片垂直居中，和底下的日期行留出呼吸。 -->
                 <StackPanel Orientation="Horizontal"
-                            Margin="14,12,14,20">
+                            VerticalAlignment="Center"
+                            Margin="14,12,14,30">
 
+                    <!-- 文件夹图标用 Windows 自己那个；没取回来之前画字形占位（仍跟颜色标签走） -->
                     <Grid Width="38" Height="38" Margin="0,0,12,0">
+                        <Image Source="{Binding Icon}"
+                               Width="32"
+                               Height="32"
+                               Stretch="Uniform"
+                               RenderOptions.BitmapScalingMode="HighQuality"
+                               Visibility="{Binding Icon, Converter={StaticResource NullToVis}, ConverterParameter=invert}" />
                         <TextBlock Text="&#xE8B7;"
                                    FontFamily="Segoe MDL2 Assets"
                                    FontSize="30"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center"
-                                   Foreground="{Binding Color, Converter={StaticResource HexToBrush}}" />
+                                   Foreground="{Binding Color, Converter={StaticResource HexToBrush}}"
+                                   Visibility="{Binding Icon, Converter={StaticResource NullToVis}}" />
                     </Grid>
 
                     <StackPanel VerticalAlignment="Center">
@@ -70,33 +81,34 @@
                                    TextTrimming="CharacterEllipsis"
                                    MaxHeight="38"
                                    TextWrapping="Wrap" />
-
-                        <TextBlock Text="{Binding RealPath}"
-                                   FontSize="11"
-                                   Foreground="{DynamicResource TextSecondaryBrush}"
-                                   TextTrimming="CharacterEllipsis"
-                                   Margin="0,3,0,0" />
-
-                        <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                            <TextBlock Text="{Binding CountText}"
-                                       FontSize="11"
-                                       Foreground="{DynamicResource TextSecondaryBrush}" />
-                            <TextBlock Text="{Binding ModifiedText}"
-                                       FontSize="11"
-                                       Margin="8,0,0,0"
-                                       Foreground="{DynamicResource TextSecondaryBrush}" />
-                            <!-- 总大小不默认算（要遍历整棵树），算过才显示这一截 -->
-                            <TextBlock Text="{Binding SizeLine}"
-                                       FontSize="11"
-                                       Margin="8,0,0,0"
-                                       Visibility="{Binding HasSize, Converter={StaticResource BoolToVis}}"
-                                       Foreground="{DynamicResource TextSecondaryBrush}" />
-                            <TextBlock Text="　路径不存在"
-                                       FontSize="11"
-                                       Foreground="{DynamicResource InvalidBrush}"
-                                       Visibility="{Binding IsValid, Converter={StaticResource BoolToVis}, ConverterParameter=invert}" />
-                        </StackPanel>
                     </StackPanel>
+                </StackPanel>
+
+                <!--
+                  左下角这一行只有最后写入时间：一眼能看出哪个目录刚动过，和右下角的 ＋/★ 同一条水平线。
+                  以前这里还写「216 个文件」—— 那个数要把整棵树走一遍，用户说不用显示，
+                  于是连扫盘一起去掉了（时间是一次 stat，不贵）。
+                -->
+                <StackPanel Orientation="Horizontal"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Bottom"
+                            Margin="14,0,64,6">
+                    <TextBlock Text="{Binding ModifiedText}"
+                               FontSize="13"
+                               Foreground="{DynamicResource TextSecondaryBrush}" />
+                    <!-- 总大小不默认算（要遍历整棵树），算过才显示这一截 -->
+                    <TextBlock Text="{Binding SizeLine}"
+                               FontSize="11.5"
+                               Margin="8,0,0,0"
+                               VerticalAlignment="Bottom"
+                               Visibility="{Binding HasSize, Converter={StaticResource BoolToVis}}"
+                               Foreground="{DynamicResource TextSecondaryBrush}" />
+                    <TextBlock Text="路径不存在"
+                               FontSize="11.5"
+                               Margin="8,0,0,0"
+                               VerticalAlignment="Bottom"
+                               Foreground="{DynamicResource InvalidBrush}"
+                               Visibility="{Binding IsValid, Converter={StaticResource BoolToVis}, ConverterParameter=invert}" />
                 </StackPanel>
 
                 <!-- 右下角两颗：＋ 在这个目录里新建，★ 收藏。放在卡片上而不是工具栏，
@@ -134,7 +146,7 @@
                 <MenuItem Header="预览内部文件" Command="{Binding PreviewCommand}" />
                 <MenuItem Header="复制路径" Command="{Binding CopyPathCommand}" ToolTip="把这个目录的真实路径放进剪贴板" />
                 <MenuItem Header="计算总大小" Command="{Binding MeasureSizeCommand}"
-                          ToolTip="整棵树称重（大目录会慢一些），算出来的数字留在卡片副标题上" />
+                          ToolTip="整棵树称重（大目录会慢一些），算出来的数字留在卡片左下角那一行" />
                 <MenuItem Header="在这个目录里新建…" Command="{Binding CreateCommand}" />
                 <Separator />
                 <MenuItem Header="加入收藏"

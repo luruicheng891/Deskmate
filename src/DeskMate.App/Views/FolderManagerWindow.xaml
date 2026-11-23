@@ -103,22 +103,33 @@
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
 
-                        <Border Grid.Column="0"
-                                Width="38"
-                                Height="38"
-                                Margin="0,0,12,0"
-                                VerticalAlignment="Center"
-                                CornerRadius="9"
-                                Background="{DynamicResource SurfaceHoverBrush}">
-                            <TextBlock Text="{Binding Badge}"
-                                       FontSize="10"
-                                       FontWeight="SemiBold"
-                                       TextAlignment="Center"
-                                       TextWrapping="Wrap"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       Foreground="{DynamicResource TextSecondaryBrush}" />
-                        </Border>
+                        <!-- 类型图标用 Windows 自己那一套；没取回来之前画扩展名角标占位 -->
+                        <Grid Grid.Column="0"
+                              Width="38"
+                              Height="38"
+                              Margin="0,0,12,0"
+                              VerticalAlignment="Center">
+                            <Image Source="{Binding Icon}"
+                                   Width="32"
+                                   Height="32"
+                                   Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"
+                                   Visibility="{Binding Icon, Converter={StaticResource NullToVis}, ConverterParameter=invert}" />
+                            <Border Width="38"
+                                    Height="38"
+                                    CornerRadius="9"
+                                    Background="{DynamicResource SurfaceHoverBrush}"
+                                    Visibility="{Binding Icon, Converter={StaticResource NullToVis}}">
+                                <TextBlock Text="{Binding Badge}"
+                                           FontSize="10"
+                                           FontWeight="SemiBold"
+                                           TextAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TextSecondaryBrush}" />
+                            </Border>
+                        </Grid>
 
                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock Text="{Binding Name}"
@@ -128,18 +139,28 @@
                                        TextTrimming="CharacterEllipsis"
                                        MaxHeight="36"
                                        TextWrapping="Wrap" />
-                            <TextBlock Margin="0,5,0,0"
-                                       FontSize="11"
-                                       Foreground="{DynamicResource TextSecondaryBrush}">
-                                <!-- Run.Text 默认是 TwoWay 绑定，绑到只读属性上会在生成容器时抛 XamlParseException，必须显式 OneWay -->
-                                <Run Text="{Binding SizeText, Mode=OneWay}" /><Run Text="　·　" /><Run Text="{Binding ModifiedText, Mode=OneWay}" />
-                            </TextBlock>
                         </StackPanel>
                     </Grid>
+
+                    <!--
+                      大小 · 修改日期挪到左下角，和右下角的星星同一条水平线 —— 与文件夹卡片同一版式，
+                      用户翻不同页面时眼睛不用重新学一次「信息在哪」。
+                    -->
+                    <TextBlock Grid.Row="1"
+                               HorizontalAlignment="Left"
+                               VerticalAlignment="Center"
+                               Margin="0,8,0,0"
+                               FontSize="12.5"
+                               Foreground="{DynamicResource TextSecondaryBrush}">
+                        <!-- Run.Text 默认是 TwoWay 绑定，绑到只读属性上会在生成容器时抛 XamlParseException，必须显式 OneWay -->
+                        <Run Text="{Binding SizeText, Mode=OneWay}" /><Run Text="　·　" /><Run Text="{Binding ModifiedText, Mode=OneWay}" />
+                    </TextBlock>
 
                     <Button Grid.Row="1"
                             Content="{Binding StarGlyph}"
                             HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Margin="0,8,0,0"
                             ToolTip="{Binding StarTip}"
                             Command="{Binding ToggleFavoriteCommand}">
                         <Button.Style>
@@ -244,7 +265,7 @@
                 </Button>
             </StackPanel>
 
-            <!-- 唯一的搜索框：放大镜图标放在框内左侧。横向撑满剩余空间，并留一个够点的最小宽度 -->
+            <!-- 搜索框：放大镜图标放在框内左侧。横向撑满剩余空间，并留一个够点的最小宽度 -->
             <Border Grid.Column="1"
                     MinWidth="240"
                     MaxWidth="420"
@@ -330,9 +351,149 @@
                        Style="{StaticResource CaptionTextStyle}" />
         </StackPanel>
 
+        <!--
+          地址栏那一行：贴着内容区顶部，浏览与不浏览都在同一格。
+          左边「←」退一层，中间这一格两种状态共用位置 —— 平时是面包屑（每段能点），
+          点空白处 / Ctrl+L 就变成可编辑的路径（能粘贴、能选中复制、回车走人），
+          跟资源管理器地址栏一个手感。右边「＋ / 在资源管理器打开」只在浏览时出现。
+        -->
+        <Grid Grid.Row="2" Grid.Column="0" VerticalAlignment="Top" Height="36" Margin="0,0,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0"
+                    Content="&#xE76B;"
+                    Style="{StaticResource IconButtonStyle}"
+                    VerticalAlignment="Center"
+                    ToolTip="返回上一层（没有上一层就回到文件夹列表）"
+                    Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}}"
+                    Command="{Binding GoBackPreviewCommand}" />
+
+            <Border x:Name="AddressBar"
+                    Grid.Column="1"
+                    MinHeight="30"
+                    Margin="8,0"
+                    VerticalAlignment="Stretch"
+                    MouseLeftButtonUp="OnAddressBarClick"
+                    Background="{DynamicResource SurfaceBrush}"
+                    BorderBrush="{DynamicResource StrokeBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="9,0,5,0"
+                    ToolTip="{Binding PathBoxText}">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Left"
+                               Text="&#xE8B7;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="14"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               VerticalAlignment="Center"
+                               Margin="0,0,9,0" />
+                    <!-- 复制这一格里的路径：框里选中再 Ctrl+C 也一样能用，这颗只是让「能复制」看得见 -->
+                    <Button DockPanel.Dock="Right"
+                            Content="&#xE8C8;"
+                            Style="{StaticResource IconButtonStyle}"
+                            VerticalAlignment="Center"
+                            ToolTip="复制这一格里的路径（选中框里的字按 Ctrl+C 也一样）"
+                            Command="{Binding CopyPathBoxCommand}" />
+
+                    <Grid>
+                        <!--
+                          输入框一直在那儿，两种「显示态」是盖在它上面的那两层。
+                          为什么不用 Visibility 收掉输入框：收掉的元素拿不到焦点，
+                          点一下「转成可编辑」就永远转不过去（自检合成点击时真撞上过）。
+                        -->
+                        <TextBox x:Name="PathBox"
+                                 Style="{StaticResource SearchBoxStyle}"
+                                 FontSize="12.5"
+                                 VerticalContentAlignment="Center"
+                                 Text="{Binding PathBoxText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 KeyDown="OnPathBoxKeyDown"
+                                 GotKeyboardFocus="OnPathBoxFocusChanged"
+                                 LostKeyboardFocus="OnPathBoxFocusChanged" />
+
+                        <!-- 空着的时候说清这一格是干什么的：一个空白框只会让人直接跳过它 -->
+                        <TextBlock Text="输入或粘贴一个路径 · 回车跳转（Ctrl+L）"
+                                   Background="{DynamicResource SurfaceBrush}"
+                                   FontSize="12.5"
+                                   VerticalAlignment="Stretch"
+                                   Padding="0,0,10,0"
+                                   Opacity="0.6"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                   Visibility="{Binding IsAddressHintVisible, Converter={StaticResource BoolToVis}}" />
+
+                        <!-- 显示态一：正在浏览 → 面包屑，每一段都能点 -->
+                        <Border Background="{DynamicResource SurfaceBrush}"
+                                Visibility="{Binding IsAddressSegmentsVisible, Converter={StaticResource BoolToVis}}">
+                            <ScrollViewer VerticalScrollBarVisibility="Disabled"
+                                          HorizontalScrollBarVisibility="Hidden">
+                                <ItemsControl ItemsSource="{Binding Breadcrumbs}"
+                                              VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button Content="{Binding Display}"
+                                                        Style="{StaticResource CrumbButtonStyle}"
+                                                        ToolTip="{Binding Path}"
+                                                        Command="{Binding DataContext.BrowseToCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}" />
+                                                <TextBlock x:Name="Sep"
+                                                           Text="›"
+                                                           Margin="3,0,1,0"
+                                                           VerticalAlignment="Center"
+                                                           FontSize="11"
+                                                           Foreground="{DynamicResource TextSecondaryBrush}" />
+                                            </StackPanel>
+                                            <DataTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding IsLast}" Value="True">
+                                                    <Setter TargetName="Sep" Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </DataTemplate.Triggers>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Border>
+
+                        <!-- 显示态二：没在浏览 → 一格纯文本（焦点那条的路径），点一下就变成可编辑 -->
+                        <TextBlock Text="{Binding PathBoxText}"
+                                   Background="{DynamicResource SurfaceBrush}"
+                                   FontSize="12.5"
+                                   VerticalAlignment="Stretch"
+                                   Padding="0,0,10,0"
+                                   TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                   Visibility="{Binding IsAddressPlainTextVisible, Converter={StaticResource BoolToVis}}" />
+                    </Grid>
+                </DockPanel>
+            </Border>
+
+            <StackPanel Grid.Column="2"
+                        Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}}">
+                <Button Content="&#xE710;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="在这一层新建：不带后缀=文件夹，带后缀（如 .c）=文件"
+                        Command="{Binding BeginCreateInPreviewCommand}" />
+                <Button Content="&#xE838;"
+                        Style="{StaticResource IconButtonStyle}"
+                        ToolTip="在资源管理器里打开这一层"
+                        Command="{Binding OpenBrowseInExplorerCommand}" />
+            </StackPanel>
+        </Grid>
+
         <!-- 卡片网格那一层（全部 / 分组 / 桌面分类 / 收藏 / 搜索）。进入某个文件夹时整块收起，
              由下面的浏览列表接管主区 —— 两边不同时出现，省得看混。 -->
-        <Grid x:Name="GridHost" Grid.Row="2" Grid.Column="0"
+        <Grid x:Name="GridHost" Grid.Row="2" Grid.Column="0" Margin="0,40,0,0"
               Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}, ConverterParameter=invert}">
 
         <!-- 文件夹引用视图：卡片列表，可直接把文件夹拖进来 -->
@@ -419,7 +580,7 @@
                         <Border Width="{Binding DataContext.CardItemWidth, RelativeSource={RelativeSource AncestorType=Window}}"
                                 MinHeight="98"
                                 Margin="0,0,12,12"
-                                Padding="14,12,14,20"
+                                Padding="14,12,14,8"
                                 CornerRadius="12"
                                 Cursor="Hand"
                                 Background="{DynamicResource SurfaceBrush}"
@@ -446,7 +607,7 @@
                                     <MenuItem Header="打开文件位置" Command="{Binding RevealCommand}" />
                                     <MenuItem Header="复制路径" Command="{Binding CopyPathCommand}" />
                                     <MenuItem Header="计算总大小" Command="{Binding MeasureSizeCommand}"
-                                              ToolTip="目录要整棵树称重，所以不默认算；算完写进这一行副标题" />
+                                              ToolTip="目录要整棵树称重，所以不默认算；算完写进左下角那一行" />
                                     <Separator />
                                     <MenuItem Header="重命名…" Command="{Binding RenameCommand}"
                                               ToolTip="只改名字，不挪位置。同名或非法字符会被挡下来，什么都不改。" />
@@ -458,33 +619,47 @@
                             </Border.ContextMenu>
 
                             <Grid>
-                                <StackPanel Orientation="Horizontal">
-                                    <Border Width="38"
-                                            Height="38"
-                                            Margin="0,0,12,0"
-                                            VerticalAlignment="Center"
-                                            CornerRadius="9"
-                                            Background="{DynamicResource SurfaceHoverBrush}">
-                                        <Grid>
-                                            <!-- 目录用文件夹字形，文件用扩展名角标（ZIP / C / DOCX） -->
-                                            <TextBlock Text="&#xE8B7;"
-                                                       FontFamily="Segoe MDL2 Assets"
-                                                       FontSize="22"
-                                                       HorizontalAlignment="Center"
-                                                       VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource TextSecondaryBrush}"
-                                                       Visibility="{Binding IsDirectory, Converter={StaticResource BoolToVis}}" />
-                                            <TextBlock Text="{Binding Badge}"
-                                                       FontSize="10"
-                                                       FontWeight="SemiBold"
-                                                       TextAlignment="Center"
-                                                       TextWrapping="Wrap"
-                                                       HorizontalAlignment="Center"
-                                                       VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource TextSecondaryBrush}"
-                                                       Visibility="{Binding IsDirectory, Converter={StaticResource BoolToVis}, ConverterParameter=invert}" />
-                                        </Grid>
-                                    </Border>
+                                <!-- 名字下面那行「所在目录」去掉了吗：完整路径由顶部地址栏那一格写（选中哪条写哪条），
+                                     悬停 ToolTip 与右键「复制路径」都还在 —— 与文件夹卡片同一版式。
+                                     底下留 22 是给左下角「大小 · 时间」和右下角那颗星星让位，让名字落在日期行之上居中。 -->
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,22">
+                                    <!-- 类型图标用 Windows 自己那一套；详情/图标回来之前画字形或角标占位 -->
+                                    <Grid Width="38"
+                                          Height="38"
+                                          Margin="0,0,12,0"
+                                          VerticalAlignment="Center">
+                                        <Image Source="{Binding Icon}"
+                                               Width="32"
+                                               Height="32"
+                                               Stretch="Uniform"
+                                               RenderOptions.BitmapScalingMode="HighQuality"
+                                               Visibility="{Binding Icon, Converter={StaticResource NullToVis}, ConverterParameter=invert}" />
+                                        <Border Width="38"
+                                                Height="38"
+                                                CornerRadius="9"
+                                                Background="{DynamicResource SurfaceHoverBrush}"
+                                                Visibility="{Binding Icon, Converter={StaticResource NullToVis}}">
+                                            <Grid>
+                                                <!-- 目录用文件夹字形，文件用扩展名角标（ZIP / C / DOCX） -->
+                                                <TextBlock Text="&#xE8B7;"
+                                                           FontFamily="Segoe MDL2 Assets"
+                                                           FontSize="22"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                                           Visibility="{Binding IsDirectory, Converter={StaticResource BoolToVis}}" />
+                                                <TextBlock Text="{Binding Badge}"
+                                                           FontSize="10"
+                                                           FontWeight="SemiBold"
+                                                           TextAlignment="Center"
+                                                           TextWrapping="Wrap"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                                           Visibility="{Binding IsDirectory, Converter={StaticResource BoolToVis}, ConverterParameter=invert}" />
+                                            </Grid>
+                                        </Border>
+                                    </Grid>
 
                                     <StackPanel VerticalAlignment="Center" MaxWidth="176">
                                         <TextBlock Text="{Binding Title}"
@@ -494,27 +669,30 @@
                                                    TextTrimming="CharacterEllipsis"
                                                    MaxHeight="38"
                                                    TextWrapping="Wrap" />
-                                        <TextBlock Text="{Binding Location}"
-                                                   FontSize="11"
-                                                   Foreground="{DynamicResource TextSecondaryBrush}"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   Margin="0,3,0,0" />
-                                        <TextBlock Text="{Binding MetaText}"
-                                                   FontSize="11"
-                                                   Margin="0,5,0,0">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsValid}" Value="False">
-                                                            <Setter Property="Foreground" Value="{DynamicResource InvalidBrush}" />
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
                                     </StackPanel>
                                 </StackPanel>
+
+                                <!--
+                                  大小 / 时间这一行挪到左下角，和右下角的星星同一条水平线 ——
+                                  与文件夹卡片、桌面分类卡片同一版式（目录默认只给日期，右键称完重才加上大小）。
+                                -->
+                                <TextBlock Text="{Binding MetaText}"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Bottom"
+                                           MaxWidth="200"
+                                           TextTrimming="CharacterEllipsis"
+                                           FontSize="12.5">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsValid}" Value="False">
+                                                    <Setter Property="Foreground" Value="{DynamicResource InvalidBrush}" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
 
                                 <Button Content="{Binding StarGlyph}"
                                         HorizontalAlignment="Right"
@@ -536,7 +714,7 @@
                    Visibility="{Binding IsDesktopEmpty, Converter={StaticResource BoolToVis}}"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Top"
-                   Margin="0,56,0,0"
+                   Margin="0,96,0,0"
                    IsHitTestVisible="False"
                    Style="{StaticResource CaptionTextStyle}" />
 
@@ -545,7 +723,7 @@
                    Visibility="{Binding IsSearchEmpty, Converter={StaticResource BoolToVis}}"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Top"
-                   Margin="0,56,0,0"
+                   Margin="0,96,0,0"
                    TextWrapping="Wrap"
                    TextAlignment="Center"
                    MaxWidth="560"
@@ -557,7 +735,7 @@
                    Visibility="{Binding IsFavoritesEmpty, Converter={StaticResource BoolToVis}}"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Top"
-                   Margin="0,56,0,0"
+                   Margin="0,96,0,0"
                    TextWrapping="Wrap"
                    TextAlignment="Center"
                    MaxWidth="560"
@@ -566,87 +744,18 @@
         </Grid>
 
         <!-- 浏览某个文件夹的内部：主区直接列这一层的东西（像资源管理器那样走进去），
-             右边那一栏同时是内容窗格。单击目录 = 走进它，单击文件 = 右边看内容，双击 = 交给系统打开。 -->
-        <Grid x:Name="BrowseHost" Grid.Row="2" Grid.Column="0" Margin="0,10,0,0"
+             右边那一栏同时是内容窗格。单击目录 = 走进它，单击文件 = 右边看内容，双击 = 交给系统打开。
+             退层、新建、在资源管理器打开、地址栏都在上面那一行命令栏里，这里只管表头与列表。 -->
+        <Grid x:Name="BrowseHost" Grid.Row="2" Grid.Column="0" Margin="0,44,0,0"
               Visibility="{Binding IsBrowsing, Converter={StaticResource BoolToVis}}">
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <Grid Grid.Row="0" Margin="0,0,0,8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-
-                <Button Grid.Column="0"
-                        Content="&#xE76B;"
-                        Style="{StaticResource IconButtonStyle}"
-                        ToolTip="返回上一层（没有上一层就回到文件夹列表）"
-                        Command="{Binding GoBackPreviewCommand}" />
-
-                <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding BrowseTitle}"
-                               FontSize="14"
-                               FontWeight="SemiBold"
-                               TextTrimming="CharacterEllipsis"
-                               Foreground="{DynamicResource TextPrimaryBrush}" />
-
-                    <!-- 面包屑：每一段都能点，深四五层时不用按 ← 数着退回去。
-                         命令经祖先取（段的 DataContext 是 BreadcrumbItem 自己）。 -->
-                    <ScrollViewer Margin="0,2,0,0"
-                                  VerticalScrollBarVisibility="Disabled"
-                                  HorizontalScrollBarVisibility="Hidden">
-                        <ItemsControl ItemsSource="{Binding Breadcrumbs}">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <StackPanel Orientation="Horizontal" />
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Orientation="Horizontal">
-                                        <Button Content="{Binding Display}"
-                                                Style="{StaticResource CrumbButtonStyle}"
-                                                ToolTip="{Binding Path}"
-                                                Command="{Binding DataContext.BrowseToCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                CommandParameter="{Binding}" />
-                                        <TextBlock x:Name="Sep"
-                                                   Text="›"
-                                                   Margin="3,0,1,0"
-                                                   VerticalAlignment="Center"
-                                                   FontSize="11"
-                                                   Foreground="{DynamicResource TextSecondaryBrush}" />
-                                    </StackPanel>
-                                    <DataTemplate.Triggers>
-                                        <DataTrigger Binding="{Binding IsLast}" Value="True">
-                                            <Setter TargetName="Sep" Property="Visibility" Value="Collapsed" />
-                                        </DataTrigger>
-                                    </DataTemplate.Triggers>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-                </StackPanel>
-
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="&#xE710;"
-                            Style="{StaticResource IconButtonStyle}"
-                            ToolTip="在这一层新建：不带后缀=文件夹，带后缀（如 .c）=文件"
-                            Command="{Binding BeginCreateInPreviewCommand}" />
-                    <Button Content="&#xE838;"
-                            Style="{StaticResource IconButtonStyle}"
-                            ToolTip="在资源管理器里打开这一层"
-                            Command="{Binding OpenBrowseInExplorerCommand}" />
-                </StackPanel>
-            </Grid>
-
             <!-- 表头与条目用同样的固定列宽，名字列吃掉剩余空间，这样标题不会跟内容错位。
                  列头同时是排序入口：点一下选列、再点翻转方向，箭头跟着走。 -->
-            <Grid Grid.Row="1" Margin="10,0,10,4">
+            <Grid Grid.Row="0" Margin="10,6,10,4">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="64" />
@@ -690,7 +799,7 @@
                         ToolTip="重新数这一层（F5）。磁盘被别的程序改动时这里会自动跟上，这一下是手动兜底。" />
             </Grid>
 
-            <ListBox Grid.Row="2"
+            <ListBox Grid.Row="1"
                      x:Name="BrowseList"
                      ItemsSource="{Binding PreviewItems}"
                      Background="Transparent"
@@ -776,12 +885,23 @@
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Column="0" Orientation="Horizontal">
-                                <TextBlock Text="{Binding IsDirectory, Converter={StaticResource DirectoryGlyph}}"
-                                           FontFamily="Segoe MDL2 Assets"
-                                           FontSize="14"
-                                           Margin="0,0,8,0"
-                                           VerticalAlignment="Center"
-                                           Foreground="{DynamicResource TextSecondaryBrush}" />
+                                <!--
+                                  类型图标用 Windows 自己那一套（目录=文件夹，文件=关联类型的默认图标）。
+                                  图标是异步回来的，回来之前画原来的字形占位，行高不许跳。
+                                -->
+                                <Grid Width="18" Height="18" Margin="0,0,8,0" VerticalAlignment="Center">
+                                    <Image Source="{Binding Icon}"
+                                           Stretch="Uniform"
+                                           RenderOptions.BitmapScalingMode="HighQuality"
+                                           Visibility="{Binding Icon, Converter={StaticResource NullToVis}, ConverterParameter=invert}" />
+                                    <TextBlock Text="{Binding IsDirectory, Converter={StaticResource DirectoryGlyph}}"
+                                               FontFamily="Segoe MDL2 Assets"
+                                               FontSize="14"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"
+                                               Visibility="{Binding Icon, Converter={StaticResource NullToVis}}" />
+                                </Grid>
                                 <TextBlock Text="{Binding Name}"
                                            FontSize="13"
                                            VerticalAlignment="Center"
@@ -833,7 +953,7 @@
 
             <!-- 橡皮筋矩形：与列表同一个格子、写在它之后才盖在它上面；IsHitTestVisible=False，绝不抢列表的点击 -->
             <Rectangle x:Name="BandRect"
-                       Grid.Row="2"
+                       Grid.Row="1"
                        Width="0"
                        Height="0"
                        HorizontalAlignment="Left"
@@ -853,7 +973,7 @@
                 Grid.Row="2"
                 Grid.Column="1"
                 Width="520"
-                Margin="16,10,0,0"
+                Margin="16,44,0,0"
                 VerticalAlignment="Stretch"
                 Background="{DynamicResource SurfaceBrush}"
                 BorderBrush="{DynamicResource StrokeBrush}"

@@ -49,7 +49,21 @@ public class DesktopFileRulesTests
     [InlineData("desktop.ini")]
     [InlineData("Thumbs.db")]
     [InlineData(".DS_Store")]
+    [InlineData("Google Chrome.lnk")]
+    [InlineData("geek.exe")]
+    [InlineData("Death Stranding.url")]
     public void ShouldIgnore_WindowsAndDotFiles(string fileName)
+        => Assert.True(DesktopFileRules.ShouldIgnore(fileName, FileAttributes.Normal));
+
+    /// <summary>
+    /// 桌面上的快捷方式、程序本体、网页快捷方式不算「待整理的内容」：
+    /// 它们混进「其他」会把这一页变成几十枚启动器，而启动本来有启动台和 Dock 管。
+    /// </summary>
+    [Theory]
+    [InlineData("微信.lnk")]
+    [InlineData("Notepad.EXE")]
+    [InlineData("内网.url")]
+    public void ShouldIgnore_Launchers(string fileName)
         => Assert.True(DesktopFileRules.ShouldIgnore(fileName, FileAttributes.Normal));
 
     [Fact]

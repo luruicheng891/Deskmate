@@ -117,6 +117,9 @@ public sealed partial class LauncherViewModel : ObservableObject
     [ObservableProperty]
     private string _statusText = "正在准备应用列表…";
 
+    /// <summary>列表已经在手上（预热过或上次呼出留下的）：窗口据此决定要不要再走一遍载入。</summary>
+    public bool IsLoaded { get; private set; }
+
     /// <summary>首次打开扫描（缓存命中时很快），随后后台静默刷新。</summary>
     public async Task LoadAsync()
     {
@@ -137,6 +140,7 @@ public sealed partial class LauncherViewModel : ObservableObject
         }
 
         await ApplyFilterAsync();
+        IsLoaded = true;
         await RefreshAsync(report: false);
     }
 
@@ -196,6 +200,14 @@ public sealed partial class LauncherViewModel : ObservableObject
         var removed = before.Except(after).Count();
 
         _apps = fresh;
+
+        // 现场没变就别重铺一遍：每次呼出都 Clear+Add 会把整片磁贴容器重建，
+        // 实测在开场动画中间按住界面一百多毫秒 —— 面板正长着，画面却定住，就是「卡卡的」。
+        if (added == 0 && removed == 0)
+        {
+            return;
+        }
+
         await ApplyFilterAsync();
 
         if (!report)

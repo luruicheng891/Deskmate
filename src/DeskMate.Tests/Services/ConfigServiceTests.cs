@@ -47,7 +47,7 @@ public class ConfigServiceTests : IDisposable
         await service.LoadAsync();
 
         Assert.Equal("Alt+Space", service.Current.Hotkey);
-        Assert.Equal(56, service.Current.DockIconSize);
+        Assert.Equal(44, service.Current.DockIconSize);
         Assert.Empty(service.Current.DockItems);
     }
 
@@ -106,7 +106,7 @@ public class ConfigServiceTests : IDisposable
         var service = Create(path);
         await service.LoadAsync();
 
-        Assert.Equal(56, service.Current.DockIconSize);
+        Assert.Equal(44, service.Current.DockIconSize);
         Assert.True(Directory.GetFiles(_temp.Path, "config.json.corrupt-*").Length >= 1, "损坏的配置应留档而不是直接丢弃");
     }
 

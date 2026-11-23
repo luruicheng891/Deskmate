@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -43,10 +44,17 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         "#8B5CF6", "#EC4899", "#14B8A6", "#64748B",
     ];
 
+    /// <summary>浏览行图标在界面上的边长（DIP）：行高 28，图标比字略大一点才认得出类型。</summary>
+    private const int RowIconSize = 16;
+
+    /// <summary>卡片图标在界面上的边长（DIP）：卡片上那个 38 的格子留给图标 32。</summary>
+    private const int CardIconSize = 32;
+
     private readonly IFolderService _folders;
     private readonly IAppLauncherService _launcher;
     private readonly IDesktopFileService _desktopFiles;
     private readonly IFileOperationService _files;
+    private readonly IIconService _icons;
     private readonly IConfigService _config;
     private readonly ILogger<FolderManagerViewModel> _logger;
     private readonly DispatcherTimer _debounce;
@@ -90,20 +98,29 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
     private FolderCardViewModel? _contextCard;
     private FolderCardViewModel? _renameTarget;
-    private CancellationTokenSource? _countCts;
+    private CancellationTokenSource? _timeCts;
 
     /// <summary>
-    /// 按路径缓存的目录足迹（文件数 + 最后修改时间，称过重的还带大小）。
-    /// 以前每次切 Tab 都对每张卡片重新全树遍历一遍 —— 屏幕上是十几张卡，就是一十几轮扫盘，
+    /// 按路径缓存的目录足迹（最后修改时间，称过重的还带大小与文件数）。
+    /// 以前每次切 Tab 都对每张卡片重新全树遍历一遍 —— 屏幕上是十几张卡，就是十几轮扫盘，
     /// 机械盘与网盘上「切个标签页卡一下」正是这么来的。
     /// </summary>
     private readonly Dictionary<string, FolderFootprint> _footprints = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 按路径缓存的目录时间（一次 stat 的结果）。卡片上只留这一行元信息，
+    /// 所以它单独存：数文件要遍历整棵树，而那个数字已经不显示了。
+    /// </summary>
+    private readonly Dictionary<string, DateTime> _modified = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 真的去扫过盘几次（缓存命中不算）。给单测与自检用：
     /// 「切个标签页又把每张卡重数一遍」这类回归，只有把次数摆出来才看得见。
     /// </summary>
     public int FootprintProbes { get; private set; }
+
+    /// <summary>真的去 stat 过几个目录（缓存命中不算），与 <see cref="FootprintProbes"/> 同样只给测试与自检看。</summary>
+    public int TimeProbes { get; private set; }
 
     // 预览面板的下钻状态：点进子目录之后要能一层层退回去。
     private readonly Stack<string> _previewBack = new();
@@ -118,6 +135,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         IAppLauncherService launcher,
         IDesktopFileService desktopFiles,
         IFileOperationService files,
+        IIconService icons,
         IConfigService config,
         ILogger<FolderManagerViewModel> logger)
     {
@@ -125,6 +143,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         _launcher = launcher;
         _desktopFiles = desktopFiles;
         _files = files;
+        _icons = icons;
         _config = config;
         _logger = logger;
         _dispatcher = Dispatcher.CurrentDispatcher;
@@ -232,17 +251,27 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     /// <summary>正在浏览的这一层（空串 = 没在浏览）。</summary>
     public string BrowsePath => _previewPath;
 
-    /// <summary>面包屑那行的层名。</summary>
-    public string BrowseTitle => _previewPath.Length == 0 ? string.Empty : LeafName(_previewPath);
-
-    /// <summary>返回按钮上写的那个字：上一层的名字，没有上一层就是「回文件夹列表」。</summary>
-    public string BackTitle => _previewBack.Count > 0 ? LeafName(_previewBack.Peek()) : "文件夹列表";
-
     /// <summary>
     /// 面包屑：从盘符到当前层的每一段。点哪段就直接跳到哪一层 ——
     /// 深四五层时「按 ← 数着退回去」不是人干的事。
     /// </summary>
     public IReadOnlyList<BreadcrumbItem> Breadcrumbs => BuildBreadcrumbs(_previewPath);
+
+    /// <summary>地址栏那一格现在显示面包屑：正在浏览、且人没在编辑它。</summary>
+    public bool IsAddressSegmentsVisible => IsBrowsing && !IsPathBoxEditing;
+
+    /// <summary>地址栏显示一格纯文本路径：没在浏览（框里是焦点那条），且人没在编辑。</summary>
+    public bool IsAddressPlainTextVisible => !IsBrowsing && !IsPathBoxEditing && PathBoxText.Length > 0;
+
+    /// <summary>这一格空着时的提示语 —— 一个空白框只会让人直接跳过它，不知道能往里粘路径。</summary>
+    public bool IsAddressHintVisible => !IsPathBoxEditing && PathBoxText.Length == 0;
+
+    partial void OnPathBoxTextChanged(string value)
+    {
+        // 文本层自己带底色（不然和底下的输入框重影），所以它一空就得让提示语露出来。
+        OnPropertyChanged(nameof(IsAddressPlainTextVisible));
+        OnPropertyChanged(nameof(IsAddressHintVisible));
+    }
 
     /// <summary>底部操作提示，跟着当前视图换。</summary>
     public string ViewHint => IsBrowsing
@@ -319,6 +348,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsBrowsing))]
     [NotifyPropertyChangedFor(nameof(ViewHint))]
+    [NotifyPropertyChangedFor(nameof(IsAddressSegmentsVisible))]
+    [NotifyPropertyChangedFor(nameof(IsAddressPlainTextVisible))]
+    [NotifyPropertyChangedFor(nameof(IsAddressHintVisible))]
     private bool _isPreviewOpen;
 
     [ObservableProperty]
@@ -563,6 +595,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
 
         FocusChanged?.Invoke(this, EventArgs.Empty);
+
+        // 焦点走到哪，路径框就显示哪一条 —— 想拿走「这个东西在哪」不必再右键。
+        SyncPathBox();
     }
 
     /// <summary>
@@ -589,7 +624,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     private static IFocusable? FindByPath(System.Collections.IList host, string path)
         => host.OfType<IFocusable>().FirstOrDefault(item => SamePath(item.FocusPath, path));
 
-    /// <summary>把焦点条目的路径放进剪贴板。「这个东西在哪」是最常需要拿走的信息。</summary>
+    /// <summary>
+    /// 把焦点条目的路径放进剪贴板。「这个东西在哪」是最常需要拿走的信息。
+    /// </summary>
     public void CopyPath(IFocusable? item)
     {
         if (item is null || item.FocusPath.Length == 0)
@@ -597,16 +634,123 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             return;
         }
 
+        WriteClip(item.FocusPath, $"已复制路径：{item.FocusPath}");
+    }
+
+    // ==================== 路径框：地址栏那一格 ====================
+
+    /// <summary>
+    /// 路径框里的文字，行为对齐资源管理器的地址栏：能打字、能粘贴、能整段选中复制，
+    /// 回车就「目录跳进去、文件打开」。框里显示的是「现在正在看的这一层」或「当前选中的那一条」。
+    /// </summary>
+    [ObservableProperty]
+    private string _pathBoxText = string.Empty;
+
+    /// <summary>
+    /// 地址栏正在被人编辑（由窗口的焦点事件告知）。
+    /// 编辑期间现场同步不许盖掉他写的字；失焦时立刻补回当前语境，那一格也从输入框换回面包屑。
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsAddressSegmentsVisible))]
+    [NotifyPropertyChangedFor(nameof(IsAddressPlainTextVisible))]
+    [NotifyPropertyChangedFor(nameof(IsAddressHintVisible))]
+    private bool _isPathBoxEditing;
+
+    partial void OnIsPathBoxEditingChanged(bool value)
+    {
+        if (!value)
+        {
+            SyncPathBox();
+        }
+    }
+
+    /// <summary>把路径框对齐到当前语境：正在浏览的层 &gt; 焦点所在的那一条 &gt; 空着给提示语。</summary>
+    public void SyncPathBox()
+    {
+        if (IsPathBoxEditing)
+        {
+            return;
+        }
+
+        var next = _previewPath.Length > 0
+            ? _previewPath
+            : FocusedItem?.FocusPath ?? string.Empty;
+
+        if (!string.Equals(PathBoxText, next, StringComparison.Ordinal))
+        {
+            PathBoxText = next;
+        }
+    }
+
+    /// <summary>路径框回车或点「跳转」：目录就在面板里走进这一层，文件交给系统打开。</summary>
+    [RelayCommand]
+    public void GoToPathBox()
+    {
+        var raw = (PathBoxText ?? string.Empty).Trim().Trim('"');
+
+        if (raw.Length == 0)
+        {
+            OnNotice("路径框是空的 · 输入或粘贴一个路径，回车就过去。", ToastKind.Info);
+            return;
+        }
+
+        // 资源管理器的地址栏认环境变量（%USERPROFILE%\Desktop），这里同样先展开。
+        var path = Environment.ExpandEnvironmentVariables(raw);
+
         try
         {
-            System.Windows.Clipboard.SetText(item.FocusPath);
-            OnNotice($"已复制路径：{item.FocusPath}", ToastKind.Success);
+            if (Directory.Exists(path))
+            {
+                // 与点卡片同一件事：在面板里走进这一层，不另开资源管理器窗口。
+                ShowPreview(path);
+                return;
+            }
+
+            if (File.Exists(path))
+            {
+                OpenExternally(path, System.IO.Path.GetFileName(path));
+                return;
+            }
         }
         catch (Exception ex)
         {
-            // 剪贴板被别的程序占着是真会发生的（Win11 的剪贴板历史尤其如此），不能说没反应就完了。
-            _logger.LogDebug(ex, "复制路径失败 {Path}", item.FocusPath);
-            OnNotice($"复制失败：剪贴板现在被别的程序占着，过一下再试。");
+            _logger.LogDebug(ex, "路径框跳转失败 {Path}", path);
+            OnNotice($"打不开：{ex.Message}");
+            return;
+        }
+
+        // 不存在是这里最常见的一种失败：盘没插、打错字、或者那个东西已经搬家了。
+        // 说清是哪一条路径没找到，别只回一句「无效」。
+        OnNotice($"这个路径不存在：{path}");
+    }
+
+    /// <summary>把路径框里的字整段复制走（框里选中再 Ctrl+C 也一样能用）。</summary>
+    [RelayCommand]
+    public void CopyPathBox()
+    {
+        var text = (PathBoxText ?? string.Empty).Trim();
+
+        if (text.Length == 0)
+        {
+            OnNotice("路径框是空的 · 先输入或粘贴一个路径。", ToastKind.Info);
+            return;
+        }
+
+        WriteClip(text, $"已复制：{text}");
+    }
+
+    /// <summary>写剪贴板这一件事的唯一出口：被别的程序占着是真会发生的，要说出来而不是静默失败。</summary>
+    private void WriteClip(string text, string doneMessage)
+    {
+        try
+        {
+            System.Windows.Clipboard.SetText(text);
+            OnNotice(doneMessage, ToastKind.Success);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "写入剪贴板失败 {Text}", text);
+            OnNotice("复制失败：剪贴板现在被别的程序占着，过一下再试。");
         }
     }
 
@@ -663,10 +807,32 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         await _folders.ValidateAllAsync();
         // 面板可能几小时才打开一次，桌面分类要按现场重扫，不能只靠监听。
         _desktopFiles.Refresh();
+        await RebuildViewsAsync();
+    }
+
+    /// <summary>
+    /// 重画一遍当前视图。
+    /// <para>
+    /// 目录时间这一趟只留自己马上要 await 的那一次：<c>ApplyFilter</c> 末尾本来就有一次「补齐」预热，
+    /// 两边各跑一趟的话，同一次加载会把每个目录问两遍（前一趟还会被后一趟的取消拦在半路）。
+    /// </para>
+    /// </summary>
+    private async Task RebuildViewsAsync()
+    {
         RebuildSource();
         RebuildTabs();
-        ApplyFilter();
-        await LoadCountsAsync();
+
+        _holdTimes = true;
+        try
+        {
+            ApplyFilter();
+        }
+        finally
+        {
+            _holdTimes = false;
+        }
+
+        await LoadModifiedTimesAsync();
     }
 
     partial void OnKeywordChanged(string value)
@@ -764,10 +930,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         }
 
         InvalidateFootprints();
-        RebuildSource();
-        RebuildTabs();
-        ApplyFilter();
-        await LoadCountsAsync();
+        await RebuildViewsAsync();
 
         var skipped = paths.Count - added.Count;
         var summary = added.Count switch
@@ -806,7 +969,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             var card = Cards.FirstOrDefault(candidate => candidate.Id == item.Id);
             if (card is not null)
             {
-                _ = LoadCountForAsync(card);
+                _ = LoadModifiedForAsync(card);
             }
 
             OnNotice($"已重新定位到：{item.RealPath}", ToastKind.Success);
@@ -1336,6 +1499,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             PreviewTitle = $"{LeafName(path)}　·　{path}";
             IsPreviewOpen = true;
             RaiseBrowseChanged();
+            SyncPathBox();
             return;
         }
 
@@ -1685,13 +1849,18 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     }
 
     private PreviewEntry CreatePreviewRow(BrowseEntry entry)
-        => new(this, entry.Name, entry.Path, entry.IsDirectory, entry.SizeBytes, entry.Modified)
+    {
+        var row = new PreviewEntry(this, entry.Name, entry.Path, entry.IsDirectory, entry.SizeBytes, entry.Modified)
         {
             // 预览行也能收藏，建行时就把现值带上，星星不许先画成空心再等异步回填。
             IsFavorite = _folders.IsFavorite(entry.Path),
             SizeText = entry.IsDirectory ? string.Empty : FileText.Size(entry.SizeBytes),
             ModifiedText = entry.Modified == DateTime.MinValue ? string.Empty : FileText.Modified(entry.Modified),
         };
+
+        _ = row.LoadIconAsync(RowIconSize);
+        return row;
+    }
 
     private void SetBrowseStatus()
     {
@@ -1793,9 +1962,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     private void RaiseBrowseChanged()
     {
         OnPropertyChanged(nameof(BrowsePath));
-        OnPropertyChanged(nameof(BrowseTitle));
-        OnPropertyChanged(nameof(BackTitle));
         OnPropertyChanged(nameof(Breadcrumbs));
+        OnPropertyChanged(nameof(IsAddressSegmentsVisible));
+        OnPropertyChanged(nameof(IsAddressPlainTextVisible));
     }
 
     /// <summary>把一个路径拆成「盘符 → … → 当前层」的面包屑段。</summary>
@@ -2174,10 +2343,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         await _folders.RestoreAsync(snapshot);
 
-        RebuildSource();
-        RebuildTabs();
-        ApplyFilter();
-        await LoadCountsAsync();
+        await RebuildViewsAsync();
 
         OnNotice($"已撤销：{snapshot.Count} 条引用回到了原来的位置", ToastKind.Success);
     }
@@ -2708,29 +2874,49 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     private void RebuildTabs()
     {
         var groups = _folders.GetGroups();
+        var counts = CountDesktopFiles();
 
-        Tabs.Clear();
-        Tabs.Add(new GroupTabViewModel(this, AllTabId, $"全部 {_all.Count}"));
-
-        // 收藏页固定显示（0 项也在）：星星是新功能，Tab 忽多忽少会让人找不到刚收藏的东西去哪了。
-        Tabs.Add(new GroupTabViewModel(this, FavoritesTabId, $"★ 收藏 {_folders.GetFavorites().Count}"));
+        // 「全部」「★ 收藏」固定显示（0 项也在）：Tab 忽多忽少会让同一位置的点击落空，
+        // 星星是新功能，标签少了会让人找不到刚收藏的东西去哪了。
+        var wanted = new List<(string Id, string Name)>
+        {
+            (AllTabId, $"全部 {_all.Count}"),
+            (FavoritesTabId, $"★ 收藏 {_folders.GetFavorites().Count}"),
+        };
 
         // 常用类型紧跟「全部」：桌面上散落的图片/文档/压缩包是最想一眼找到的，
-        // 且 0 个文件也照样显示 —— 标签忽多忽少会让同一位置的点击落空。
-        var counts = CountDesktopFiles();
+        // 且 0 个文件也照样显示。
         foreach (var category in DesktopFileRules.OrderedCategories)
         {
             counts.TryGetValue(category, out var taken);
-            Tabs.Add(new GroupTabViewModel(this, 
+            wanted.Add((
                 DesktopFileRules.TabId(category),
                 $"{DesktopFileRules.DisplayName(category)} {taken}"));
         }
 
         // 分组也带数量，和桌面分类同一套写法：一眼能看出哪个组还是空的。
-        Tabs.Add(new GroupTabViewModel(this, UngroupedTabId, $"未分组 {_all.Count(item => item.GroupId is null)}"));
+        wanted.Add((UngroupedTabId, $"未分组 {_all.Count(item => item.GroupId is null)}"));
         foreach (var group in groups)
         {
-            Tabs.Add(new GroupTabViewModel(this, group.Id, $"{group.Name} {_all.Count(item => item.GroupId == group.Id)}"));
+            wanted.Add((group.Id, $"{group.Name} {_all.Count(item => item.GroupId == group.Id)}"));
+        }
+
+        // Tab 换名字不换取对象：整排 Clear/Add 会连容器一起重建，
+        // 而打开面板的那一拍正缺这几十毫秒（动画会被整段吞掉）。
+        if (Tabs.Count != wanted.Count || !Tabs.Zip(wanted).All(pair => pair.First.Id == pair.Second.Id))
+        {
+            Tabs.Clear();
+            foreach (var tab in wanted)
+            {
+                Tabs.Add(new GroupTabViewModel(this, tab.Id, tab.Name));
+            }
+        }
+        else
+        {
+            foreach (var (tab, next) in Tabs.Zip(wanted))
+            {
+                tab.Name = next.Name;
+            }
         }
 
         SyncTabSelection();
@@ -2801,24 +2987,60 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             query = query.Where(item => Matches(item, key));
         }
 
-        Cards.Clear();
-        foreach (var item in query)
+        var wanted = query.ToList();
+
+        if (SameCardsOnScreen(wanted))
         {
-            Cards.Add(CreateCard(item));
+            // 成员与顺序一个没变：只把容易变的字段写回原来那批卡片，容器一个都不重建。
+            // Clear/Add 会让 WPF 把整片卡片重新生成一遍，实测在打开面板的头 340ms 里吃掉 135ms，
+            // 淡入动画被整段吞掉 —— 用户读成「打开很僵、卡卡的」。
+            foreach (var (card, item) in Cards.Zip(wanted))
+            {
+                card.DisplayName = item.DisplayName;
+                card.GroupId = item.GroupId;
+                card.Color = item.Color;
+                card.IsValid = item.Valid;
+                card.IsFavorite = _folders.IsFavorite(item.RealPath);
+            }
+        }
+        else
+        {
+            Cards.Clear();
+            foreach (var item in wanted)
+            {
+                Cards.Add(CreateCard(item));
+            }
         }
 
         // 搜完清空时状态栏不能留着「搜索「xxx」：N 个文件夹 · M 个文件」那句 —— 它说的已经不是屏幕上这些了。
         SetStatus($"当前视图 {Cards.Count} 个文件夹");
         RestoreFocusByPath();
-        WarmMissingCounts();
+        WarmMissingTimes();
     }
+
+    /// <summary>屏幕上这一批卡片和要显示的完全同一批（Id 与顺序都没变）。</summary>
+    private bool SameCardsOnScreen(IReadOnlyList<FolderItem> wanted)
+        => Cards.Count == wanted.Count
+           && Cards.Zip(wanted).All(pair => pair.First.Id == pair.Second.Id);
+
+    /// <summary>
+    /// 这一类条目在 Windows 里的默认图标（目录=文件夹，文件=关联类型的图标）。
+    /// 行与卡片都问这一处：图标服务按类型缓存，一屏同类型文件只问一次 Shell。
+    /// </summary>
+    public Task<BitmapSource?> TypeIconAsync(string path, bool isDirectory, int size)
+        => _icons.GetTypeIconAsync(path, isDirectory, size);
 
     /// <summary>桌面文件卡片：建出来就带上收藏状态，星星不能先画成空心再等异步回填。</summary>
     private DesktopFileItemViewModel CreateFileCard(DesktopFile file)
-        => new(this, file)
+    {
+        var card = new DesktopFileItemViewModel(this, file)
         {
             IsFavorite = _folders.IsFavorite(file.Path),
         };
+
+        _ = card.LoadIconAsync(CardIconSize);
+        return card;
+    }
 
     private FolderCardViewModel CreateCard(FolderItem item)
     {
@@ -2827,13 +3049,19 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         // 星星的初值必须一次到位：先画成空心再等异步回填，用户会以为刚收藏的东西没生效。
         card.IsFavorite = _folders.IsFavorite(item.RealPath);
 
-        // 足迹问过的目录立即回填：桌面监听一刷新就重建全部卡片，
-        // 不回填的话已经数过的卡片会集体退回「统计中…」，看着像工具没在动。
+        // 问过的目录立即回填：桌面监听一刷新就重建全部卡片，不回填的话已经有日期的卡片
+        // 会集体退回空白，看着像工具没在动。
+        if (_modified.TryGetValue(item.RealPath, out var when))
+        {
+            ApplyModified(card, when);
+        }
+
         if (_footprints.TryGetValue(item.RealPath, out var footprint))
         {
             ApplyFootprint(card, footprint);
         }
 
+        _ = card.LoadIconAsync(CardIconSize);
         return card;
     }
 
@@ -2882,7 +3110,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         SetStatus(IsSearchEmpty ? $"{summary} · 没找到" : summary);
         RestoreFocusByPath();
-        WarmMissingCounts();
+        WarmMissingTimes();
     }
 
     /// <summary>当前分类里一个文件都没有（空面板要有句话，不然看着像坏了）。</summary>
@@ -2933,27 +3161,57 @@ public sealed partial class FolderManagerViewModel : ObservableObject
         => PinyinMatcher.Score(item.DisplayName, key, item.RealPath) > PinyinMatcher.NoMatch;
 
     /// <summary>
-    /// 这一轮重画里还有没数过的卡片就补一轮统计。
-    /// 走 <see cref="LoadCountsAsync"/> 那条串行队列（一次一张），不并发扫盘 —— 桌面监听每隔几秒
-    /// 就会重画一次，并发版等于把盘反复碾过去。
+    /// 启动后的空闲预热：把卡片列表与 Tab 铺出来，让第一次真正打开时只剩校验与读时间。
+    /// 首开那次「建 40 张卡片 + 铺容器」实测 200ms 上下，正好压在开场动画中间 —— 动画会被整段吞掉。
+    /// 读目录时间不在这里做：那是磁盘活，留到人真的打开面板时再开始。
     /// </summary>
-    private void WarmMissingCounts()
+    public void PreWarm()
     {
-        if (Cards.Any(card => card.IsCountLoading) || SearchHits.OfType<FolderCardViewModel>().Any(card => card.IsCountLoading))
+        _holdTimes = true;
+        try
         {
-            _ = LoadCountsAsync();
+            RebuildSource();
+            RebuildTabs();
+            ApplyFilter();
+        }
+        finally
+        {
+            _holdTimes = false;
         }
     }
 
-    private async Task LoadCountsAsync()
+    private bool _holdTimes;
+
+    /// <summary>
+    /// 这一轮重画里还有没读过日期的卡片就补一轮。
+    /// 走 <see cref="LoadModifiedTimesAsync"/> 那条串行队列（一次一张），不并发扫盘 —— 桌面监听每隔几秒
+    /// 就会重画一次，并发版等于把盘反复碾过去。
+    /// </summary>
+    private void WarmMissingTimes()
     {
-        _countCts?.Cancel();
-        _countCts?.Dispose();
+        if (_holdTimes)
+        {
+            return;
+        }
+
+        if (NeedsTime(Cards) || NeedsTime(SearchHits.OfType<FolderCardViewModel>()))
+        {
+            _ = LoadModifiedTimesAsync();
+        }
+
+        static bool NeedsTime(IEnumerable<FolderCardViewModel> cards)
+            => cards.Any(card => card.IsValid && card.ModifiedText.Length == 0);
+    }
+
+    private async Task LoadModifiedTimesAsync()
+    {
+        _timeCts?.Cancel();
+        _timeCts?.Dispose();
 
         var cts = new CancellationTokenSource();
-        _countCts = cts;
+        _timeCts = cts;
 
-        // 搜索视图下卡片混在 SearchHits 里，条目数一样要统计。
+        // 搜索视图下卡片混在 SearchHits 里，日期一样要补。
         foreach (var card in Cards.Concat(SearchHits.OfType<FolderCardViewModel>()).ToList())
         {
             if (cts.IsCancellationRequested)
@@ -2961,39 +3219,50 @@ public sealed partial class FolderManagerViewModel : ObservableObject
                 return;
             }
 
-            await LoadCountForAsync(card);
+            await LoadModifiedForAsync(card);
         }
     }
 
-    private async Task LoadCountForAsync(FolderCardViewModel card)
+    private async Task LoadModifiedForAsync(FolderCardViewModel card)
     {
-        if (_footprints.TryGetValue(card.RealPath, out var cached))
+        if (!card.IsValid)
         {
-            ApplyFootprint(card, cached);
+            return;
+        }
+
+        if (_modified.TryGetValue(card.RealPath, out var known))
+        {
+            ApplyModified(card, known);
             return;
         }
 
         try
         {
-            FootprintProbes++;
-            var footprint = await _folders.MeasureAsync(card.RealPath, wantSize: false);
-            _footprints[card.RealPath] = footprint;
-            ApplyFootprint(card, footprint);
+            TimeProbes++;
+
+            // 一次 stat，不遍历树：卡片上不显示文件数之后，数一遍盘就没有任何观众了。
+            var when = await _folders.LastModifiedAsync(card.RealPath);
+            _modified[card.RealPath] = when;
+            ApplyModified(card, when);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "统计文件数失败 {Path}", card.RealPath);
-            card.IsCountLoading = false;
-            card.IsCountFailed = true;
+            _logger.LogDebug(ex, "读取目录时间失败 {Path}", card.RealPath);
         }
     }
 
+    private static void ApplyModified(FolderCardViewModel card, DateTime when)
+        => card.ModifiedText = when == DateTime.MinValue ? string.Empty : FileText.Modified(when);
+
     private static void ApplyFootprint(FolderCardViewModel card, FolderFootprint footprint)
     {
-        card.FileCount = footprint.FileCount;
-        card.ModifiedText = footprint.HasModified ? FileText.Modified(footprint.Modified) : string.Empty;
+        // 称重带回来的顺手信息：日期与总大小。文件数不再往卡片上写 —— 那一行已经撤了。
+        if (footprint.HasModified)
+        {
+            card.ModifiedText = FileText.Modified(footprint.Modified);
+        }
 
-        if (footprint.SizeMeasured && footprint.FileCount < FolderFootprint.FileCountCap)
+        if (footprint.SizeMeasured)
         {
             card.SizeText = FileText.Size(footprint.SizeBytes);
         }
@@ -3062,7 +3331,11 @@ public sealed partial class FolderManagerViewModel : ObservableObject
     }
 
     /// <summary>磁盘上的东西动了：足迹缓存整份作废（改哪一层数不清，宁可重算也别报旧数）。</summary>
-    private void InvalidateFootprints() => _footprints.Clear();
+    private void InvalidateFootprints()
+    {
+        _footprints.Clear();
+        _modified.Clear();
+    }
 
     // ==================== 收藏 ====================
 
@@ -3131,6 +3404,9 @@ public sealed partial class FolderManagerViewModel : ObservableObject
                 }
 
                 (card.IsDirectory, card.IsValid, card.Badge, card.MetaText) = detail;
+
+                // 图标要等详情回来才知道按目录还是按文件问，所以排在这里而不是建卡时。
+                _ = card.LoadIconAsync(CardIconSize);
             }
             catch (OperationCanceledException)
             {
@@ -3154,7 +3430,7 @@ public sealed partial class FolderManagerViewModel : ObservableObject
             // 收藏页可以一次摆几十条，逐条递归数文件就是打开这一页先卡一下。
             // 默认只报「多大的一坨」里最便宜的那一半：日期；要数字与大小，右键「计算总大小」。
             var modified = Directory.GetLastWriteTime(card.FullPath);
-            return (true, true, string.Empty, $"目录 · {FileText.Modified(modified)} · 右键算大小");
+            return (true, true, string.Empty, $"目录 · {FileText.Modified(modified)}");
         }
 
         if (File.Exists(card.FullPath))
@@ -3578,7 +3854,8 @@ public sealed partial class FolderManagerViewModel : ObservableObject
 
         if (card is not null)
         {
-            await LoadCountForAsync(card);
+            // 刚在里面建过东西：这个目录的写入时间变了，重问一次（缓存已在上面清掉）。
+            await LoadModifiedForAsync(card);
         }
 
         var label = option.Shape == NewEntryShape.Folder

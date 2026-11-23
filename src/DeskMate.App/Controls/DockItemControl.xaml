@@ -112,7 +112,8 @@
             </Border.Style>
         </Border>
 
-        <Button Style="{StaticResource DockGlyphStyle}"
+        <Button x:Name="GlyphButton"
+                Style="{StaticResource DockGlyphStyle}"
                 Command="{Binding LaunchCommand}"
                 ToolTip="{Binding TooltipText}"
                 Width="{Binding IconSize}"
@@ -171,6 +172,11 @@
                               ToolTip="关掉这个应用当前所有窗口（等于逐个点它们标题栏的 ×），不是退出进程"
                               Command="{Binding CloseCommand}"
                               Visibility="{Binding CloseVisibility}" />
+                    <!-- 关不掉或想立刻退出的场合用这个：不走「保存吗」，数据直接丢 -->
+                    <MenuItem Header="结束进程"
+                              ToolTip="强制结束这个应用的所有进程。不会弹「保存吗」，未保存的数据会直接丢失"
+                              Command="{Binding KillCommand}"
+                              Visibility="{Binding KillVisibility}" />
                     <MenuItem Header="重新选择目标"
                               ToolTip="软件被卸载或换了目录时用：只改 Dock 里这条引用，不动任何文件"
                               Command="{Binding RelocateCommand}"

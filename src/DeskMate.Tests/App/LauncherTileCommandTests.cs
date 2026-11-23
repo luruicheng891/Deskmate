@@ -1,4 +1,5 @@
 using System.Windows.Media.Imaging;
+using DeskMate.App.Services;
 using DeskMate.App.ViewModels;
 using DeskMate.Core.Interfaces;
 using DeskMate.Core.Models;
@@ -33,6 +34,7 @@ public sealed class LauncherTileCommandTests : IDisposable
             new FakeProbe(),
             new FakeWindows(),
             _usage,
+            new MediaSmtcWatcher(NullLogger<MediaSmtcWatcher>.Instance),
             NullLogger<DockViewModel>.Instance);
 
         _launcher = new LauncherViewModel(
@@ -133,6 +135,38 @@ public sealed class LauncherTileCommandTests : IDisposable
         Assert.Contains("已添加", _launcher.StatusText);
     }
 
+    /// <summary>
+    /// 每次呼出启动台都会后台对齐一次现场。现场没变时不许把整片磁贴重铺一遍：
+    /// 重铺让 WPF 重新生成全部容器，实测在开场动画中间按住界面一百多毫秒，
+    /// 而动画走真实时间 —— 被吃掉的那段不会补回来，人看到的就是一次「啪」。
+    /// </summary>
+    [Fact]
+    public async Task Refresh_WithUnchangedApps_KeepsTheSameTiles()
+    {
+        await _launcher.LoadAsync();
+        Assert.True(_launcher.IsLoaded);
+
+        var rowsBefore = _launcher.Rows.ToList();
+        var tilesBefore = VisibleTiles().ToList();
+
+        await _launcher.RefreshAsync(report: false);
+
+        Assert.Equal(rowsBefore, _launcher.Rows);
+        Assert.Equal(tilesBefore, VisibleTiles().ToList());
+    }
+
+    [Fact]
+    public async Task Refresh_WhenAnAppAppears_LandsTheNewTile()
+    {
+        await _launcher.LoadAsync();
+        var before = VisibleTiles().Count();
+
+        await _scanner.AddToLaunchpadAsync(@"E:\Some\New.exe");
+        await _launcher.RefreshAsync(report: false);
+
+        Assert.Equal(before + 1, VisibleTiles().Count());
+    }
+
     private IEnumerable<AppTileViewModel> VisibleTiles() => _launcher.Rows.SelectMany(row => row.Tiles);
 
     public void Dispose() => _temp.Dispose();
@@ -177,6 +211,8 @@ public sealed class LauncherTileCommandTests : IDisposable
     private sealed class NullIconService : IIconService
     {
         public Task<BitmapSource?> GetIconAsync(string path, int size = 64) => Task.FromResult<BitmapSource?>(null);
+
+        public Task<BitmapSource?> GetTypeIconAsync(string path, bool isDirectory, int size = 32) => Task.FromResult<BitmapSource?>(null);
 
         public void ClearCache()
         {
@@ -241,10 +277,14 @@ public sealed class LauncherTileCommandTests : IDisposable
 
         public Task<bool> SwitchToAsync(string executablePath) => Task.FromResult(false);
 
+        public Task<bool> RestoreFromTrayAsync(string executablePath) => Task.FromResult(false);
+
         public bool Activate(AppWindowInfo window) => false;
 
         public bool Close(AppWindowInfo window) => false;
 
         public Task<int> CloseAllAsync(string executablePath) => Task.FromResult(0);
+
+        public Task<int> KillAsync(string executablePath) => Task.FromResult(0);
     }
 }

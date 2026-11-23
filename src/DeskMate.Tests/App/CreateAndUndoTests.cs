@@ -25,7 +25,7 @@ public class CreateAndUndoTests : IDisposable
         _config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(_config, NullLogger<FolderService>.Instance);
         _viewModel = new FolderManagerViewModel(
-            _folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), _config, NullLogger<FolderManagerViewModel>.Instance);
+            _folders, new NullLauncher(), new FakeDesktopFileService(), new FakeFileOperations(), new FakeIconService(), _config, NullLogger<FolderManagerViewModel>.Instance);
         _viewModel.UserNotice += (_, args) => _notices.Add(args);
     }
 

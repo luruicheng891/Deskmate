@@ -99,6 +99,12 @@ public static class DesktopFileRules
     }
 
     /// <summary>
+    /// 桌面上的「启动器」而不是「待整理的内容」：快捷方式、程序本体、网页快捷方式。
+    /// 它们本来就该由启动台和 Dock 管，混进桌面分类只会把「其他」挤满几十枚 .lnk。
+    /// </summary>
+    private static readonly string[] LauncherExtensions = ["lnk", "exe", "url"];
+
+    /// <summary>
     /// 是否应当忽略这个文件：隐藏/系统属性、以点开头的（.DS_Store 这类）、
     /// 以及 Windows 自己维护桌面的两个文件（desktop.ini、Thumbs.db）。
     /// </summary>
@@ -111,6 +117,11 @@ public static class DesktopFileRules
 
         if (fileName.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)
             || fileName.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (LauncherExtensions.Contains(ExtensionOf(fileName)))
         {
             return true;
         }

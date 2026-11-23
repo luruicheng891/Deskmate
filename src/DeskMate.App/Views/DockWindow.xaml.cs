@@ -26,9 +26,6 @@ public partial class DockWindow : Window
     /// <summary>启动台拖拽到 Dock 时携带的数据格式（值为应用路径）。</summary>
     public const string AppPathFormat = "DeskMate.AppPath";
 
-    /// <summary>Dock 内部重排时携带的数据格式（值为 DockItem Id）。</summary>
-    public const string DockItemIdFormat = "DeskMate.DockItemId";
-
     // 悬停热区：鼠标贴到屏幕边缘这条带子里就唤出 Dock。
     // 5px 太窄 —— 光标要正好压在那几行像素上才算，用起来就是「来回蹭几下才出」。
     private const double HotZoneDip = 14;
@@ -44,6 +41,9 @@ public partial class DockWindow : Window
 
     /// <summary>拖拽中被拿起的那一枚压到多透明：压太狠就完全看不见了，太轻又读不出「被拿起来了」。</summary>
     private const double DraggedGhostOpacity = 0.35;
+
+    /// <summary>被拿起的图标向上抬的像素：和透明一起构成「被拎起来了」的手感。</summary>
+    private const double DraggedLiftPixels = 6;
     private const int NeighborReach = 2;
 
     private static readonly TimeSpan SlideDuration = TimeSpan.FromMilliseconds(200);
@@ -92,17 +92,18 @@ public partial class DockWindow : Window
     private bool _desktopLayerReported;
     private int _hoveredIndex = -1;
     private Point _dragStart;
+
+    /// <summary>按住左键时为真：气泡事件里 e.LeftButton 在 Button 捕获后会失真，按下状态自己记。</summary>
+    private bool _dragPressed;
     private HwndSource? _source;
     private DockItemViewModel? _dragCandidate;
 
-    /// <summary>正在被拖的那一枚的容器（松手前要恢复它的不透明度）。</summary>
-    private FrameworkElement? _dragSource;
+    /// <summary>正在被拖的那一枚（实时换位与落定都以它为准）。</summary>
+    private DockItemViewModel? _dragItem;
 
-    /// <summary>拖拽进行中：悬停让位动画与窗口预览都要闭嘴，插入指示线才归它管。</summary>
+    /// <summary>拖拽进行中：悬停让位动画与窗口预览都要闭嘴，落定后交给 ReorderAsync 持久化。</summary>
     private bool _dragging;
 
-    /// <summary>指示线自己的位移，构造时建一次反复改值，不在 DragOver 里反复新建。</summary>
-    private TranslateTransform? _dropShift;
     private DockItemControl? _pendingPreviewControl;
     private DockItemViewModel? _pendingPreviewItem;
     private Task<IReadOnlyList<AppWindowInfo>>? _pendingPreviewWindows;
@@ -150,16 +151,16 @@ public partial class DockWindow : Window
         _viewModel.RenameRequested += OnRenameRequested;
         _viewModel.IconRequested += OnIconRequested;
 
+        // WorkArea 变了要跟着挪：自建任务栏注册成 AppBar 后外壳会把工作区收缩掉那条带子，
+        // Dock（读 WorkArea 定位）必须立刻让到栏的上面，不能等下一次尺寸变化才动。
+        SystemParameters.StaticPropertyChanged += OnSystemPropertyChanged;
+
         _preview.DismissRequested += (_, _) => _preview.Dismiss();
         _preview.WindowChosen += (_, window) => _viewModel.ActivateWindow(window);
         _preview.CloseRequested += (_, window) => _viewModel.CloseWindow(window);
 
         // MouseEnter 是直接事件，不冒泡，所以用类级别的路由事件从图标控件收集悬停信息。
         AddHandler(DockItemControl.HoverChangedEvent, new RoutedEventHandler(OnItemHoverChanged));
-
-        // 插入指示线：位置全靠这个位移改，元素本身留在原地不参与布局。
-        _dropShift = new TranslateTransform();
-        DropIndicator.RenderTransform = _dropShift;
 
         Chrome.MouseEnter += (_, _) => _autoHideTimer.Stop();
         Chrome.MouseLeave += (_, _) => ScheduleAutoHide();
@@ -277,14 +278,45 @@ public partial class DockWindow : Window
     {
         base.OnPreviewMouseLeftButtonDown(e);
         _dragStart = e.GetPosition(this);
-        _dragCandidate = ResolveItem(e.OriginalSource as DependencyObject);
+        // 按下就掐掉预览：按住不动等起拖阈值的那段时间里，160ms 的预览计时器会先到点，
+        // 拖一个正在运行的应用时预览会在手底下弹出来。
+        _previewShowTimer.Stop();
+        _previewHideTimer.Stop();
+        _preview.Dismiss();
+        // 音乐控件位置固定（启动台、文件夹按钮之后的第三格），不参与拖拽。
+        var candidate = ResolveItem(e.OriginalSource as DependencyObject);
+        _dragCandidate = candidate is { IsMusicWidget: false } ? candidate : null;
+        _dragPressed = true;
     }
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnPreviewMouseLeftButtonUp(MouseButtonEventArgs e)
     {
-        base.OnMouseMove(e);
+        base.OnPreviewMouseLeftButtonUp(e);
 
-        if (_dragCandidate is null || e.LeftButton != MouseButtonState.Pressed)
+        if (_dragging)
+        {
+            // 拖完松手：吞掉这次抬起，免得落点正好压在别的图标上又触发一次单击启动。
+            e.Handled = true;
+        }
+
+        _dragPressed = false;
+        _dragCandidate = null;
+        _ = FinalizeDragAsync();
+    }
+
+    protected override void OnPreviewMouseMove(MouseEventArgs e)
+    {
+        base.OnPreviewMouseMove(e);
+
+        // 用隧道事件 + 自己记录的按下状态起拖：气泡 MouseMove 里 e.LeftButton 在
+        // Button 捕获鼠标后会失真成 Released（本机实测），拖拽判定永远过不去。
+        if (_dragging)
+        {
+            DragMoved(e.GetPosition(ItemsHost));
+            return;
+        }
+
+        if (!_dragPressed || _dragCandidate is null)
         {
             return;
         }
@@ -296,35 +328,225 @@ public partial class DockWindow : Window
             return;
         }
 
-        var dragged = _dragCandidate;
+        BeginDrag(_dragCandidate);
+        DragMoved(e.GetPosition(ItemsHost));
+    }
+
+    /// <summary>进入拖拽：图标上浮（抬高 + 半透明），停掉轮询，防止快照重算在手底下重排容器。</summary>
+    private void BeginDrag(DockItemViewModel dragged)
+    {
         _dragCandidate = null;
-
-        // 被拖的那一枚压成半透明，松手前一直保持：没有这个「它被拿起来了」的信号，
-        // 拖动过程在屏幕上就什么都看不出来。
-        _dragSource = ContainerOf(dragged);
+        _dragItem = dragged;
         _dragging = true;
-        if (_dragSource is not null)
-        {
-            _dragSource.Opacity = DraggedGhostOpacity;
-        }
-
-        // 拖拽期间停掉运行区轮询。DoDragDrop 自己会泵消息，2 秒一次的快照重算照样跑，
-        // 它会在你手底下把容器 Move/Insert 一遍 —— 插入点当场就算错了，表现就是「图标自己跳、拖不准」。
+        // 窗口自己捕获鼠标：不捕获的话，按下点不在图标按钮上时没有捕获链，拖出窗口松手
+        // 收不到 MouseUp，图标就永远卡在拎起状态。
+        CaptureMouse();
         _viewModel.StopRunningPolling();
+        _logger.LogInformation("Dock 起拖：{Name}（{Id}）", dragged.DisplayName, dragged.Id);
+        // 悬停/按下的放大动画要掐掉：被拖的图标就在指针底下，拖起来还带放大又叠上抬升，很怪。
+        ResetDraggedScale(dragged);
+        ApplyDragVisual(ContainerOf(dragged));
+    }
 
-        DragDrop.DoDragDrop(this, new DataObject(DockItemIdFormat, dragged.Id), DragDropEffects.Move);
-
-        // 收尾：恢复外观、重新起轮询，并立刻补一次快照（拖的这段时间里可能已经有应用开了又关）。
-        _dragging = false;
-        if (_dragSource is not null)
+    /// <summary>拖动中：光标越过哪个缝隙，被拖的图标就实时换位到哪，其它图标当场让位。</summary>
+    private void DragMoved(Point position)
+    {
+        var dragged = _dragItem;
+        if (dragged is null)
         {
-            _dragSource.Opacity = 1;
+            return;
         }
 
-        _dragSource = null;
-        HideDropIndicator();
+        var target = LiveTargetIndex(dragged, position);
+        if (target < 0)
+        {
+            return;
+        }
+
+        _viewModel.MoveItemLive(dragged.Id, target);
+        // 容器跟着条目走（Move 不重建），但保险起见每次换位后重刷上浮外观。
+        // 换位会让指针重新「进入」图标，悬停动画又会把图标顶到 1.35 倍，所以同步再复位一次。
+        ResetDraggedScale(dragged);
+        ApplyDragVisual(ContainerOf(dragged));
+    }
+
+    /// <summary>松手落定：把当前显示顺序交给 ReorderAsync 持久化，恢复外观与轮询。</summary>
+    private async Task FinalizeDragAsync()
+    {
+        var dragged = _dragItem;
+        if (!_dragging || dragged is null)
+        {
+            return;
+        }
+
+        _dragging = false;
+        _dragItem = null;
+        if (IsMouseCaptured)
+        {
+            ReleaseMouseCapture();
+        }
+
+        ClearDragVisual(ContainerOf(dragged));
+
+        try
+        {
+            await _viewModel.ReorderAsync(_viewModel.Items.Select(item => item.Id));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "保存拖拽后的 Dock 顺序失败");
+        }
+
+        // 落定时会重建条目，容器全是新的；指针正压在那儿，新控件一出生就吃掉一次悬停放大。
+        // 先立刻复位，等布局落定后再补一次，保证松手后停在原尺寸。
+        ResetDraggedScale(dragged);
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (!_dragging)
+            {
+                ResetDraggedScale(dragged);
+            }
+        }));
+
         _viewModel.StartRunningPolling();
         _ = _viewModel.RefreshRunningStateAsync();
+    }
+
+    /// <summary>拖拽期间鼠标捕获被抢走（弹窗、Alt+Tab 等）：按松手收尾，别把图标卡在拎起状态。</summary>
+    protected override void OnLostMouseCapture(MouseEventArgs e)
+    {
+        base.OnLostMouseCapture(e);
+        // LostMouseCapture 会冒泡：BeginDrag 把捕获从图标按钮抢到窗口的那一次也会路过这里
+        // （OriginalSource 是按钮），把它当成拖拽中断就会当场把 _dragItem 清掉、拖动全程失灵。
+        // 只有窗口自己丢了捕获（弹窗、Alt+Tab 抢走）才算异常中断。
+        if (_dragging && e.OriginalSource == this)
+        {
+            _ = FinalizeDragAsync();
+        }
+    }
+
+    /// <summary>被拖的图标：抬高几像素 + 半透明，视觉上是「被拎起来了」。</summary>
+    private void ApplyDragVisual(FrameworkElement? container)
+    {
+        if (container is null)
+        {
+            return;
+        }
+
+        container.Opacity = DraggedGhostOpacity;
+        container.RenderTransform = IsVertical
+            ? new TranslateTransform(-DraggedLiftPixels, 0)
+            : new TranslateTransform(0, -DraggedLiftPixels);
+    }
+
+    private void ClearDragVisual(FrameworkElement? container)
+    {
+        if (container is null)
+        {
+            return;
+        }
+
+        container.Opacity = 1;
+        container.RenderTransform = null;
+    }
+
+    /// <summary>
+    /// 把被拖图标复位成原尺寸。拖动时指针一直压在它上面，悬停（1.35 倍）和按下（1.15 倍）
+    /// 的动画会停在放大后的值上，不手动复位就一直比原来大一圈。
+    /// </summary>
+    private void ResetDraggedScale(DockItemViewModel item)
+    {
+        if (ContainerOf(item) is { } container && FindItemControl(container) is { } control)
+        {
+            control.ResetHoverScale();
+        }
+    }
+
+    /// <summary>在容器子树里找图标控件（模板套上之后容器里才有它）。</summary>
+    private static DockItemControl? FindItemControl(DependencyObject? root)
+    {
+        switch (root)
+        {
+            case null:
+                return null;
+            case DockItemControl control:
+                return control;
+        }
+
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            if (FindItemControl(VisualTreeHelper.GetChild(root, index)) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 把光标位置换算成被拖条目的目标下标：先找「光标落在哪个缝隙前」，再按分区收窄 ——
+    /// 运行区临时项只在运行区里挪（位置跟启动时间走，拖出去也保不住），固定项只在固定区里挪。
+    /// </summary>
+    private int LiveTargetIndex(DockItemViewModel dragged, Point position)
+    {
+        var vertical = IsVertical;
+        var axis = vertical ? position.Y : position.X;
+        var gap = ItemsHost.Items.Count;
+
+        for (var index = 0; index < ItemsHost.Items.Count; index++)
+        {
+            if (ItemsHost.ItemContainerGenerator.ContainerFromIndex(index) is not FrameworkElement container)
+            {
+                continue;
+            }
+
+            var center = container.TranslatePoint(
+                new Point(container.ActualWidth / 2, container.ActualHeight / 2), ItemsHost);
+
+            if (axis < (vertical ? center.Y : center.X))
+            {
+                gap = index;
+                break;
+            }
+        }
+
+        // 缝隙是「含被拖项」的插入点：落点在被拖项原位之前则原位起 index 直接用，之后则前移一位。
+        var items = _viewModel.Items;
+        var old = items.IndexOf(dragged);
+        var target = gap <= old ? gap : gap - 1;
+
+        var pinnedStart = -1;
+        var musicIndex = -1;
+        for (var index = 0; index < items.Count; index++)
+        {
+            if (pinnedStart < 0 && items[index].IsPinned)
+            {
+                pinnedStart = index;
+            }
+
+            if (musicIndex < 0 && items[index].IsMusicWidget)
+            {
+                musicIndex = index;
+            }
+        }
+
+        if (pinnedStart < 0)
+        {
+            pinnedStart = items.Count;
+        }
+
+        // 音乐控件占 0 号位，谁都不许挪到它前面。
+        var min = musicIndex >= 0 ? 1 : 0;
+
+        if (dragged.IsPinned)
+        {
+            return Math.Clamp(target, Math.Max(pinnedStart, min), items.Count - 1);
+        }
+
+        // 运行区临时项：只能在 [min, pinnedStart-1] 里挪；区里只剩它一个时原地不动。
+        var runningEnd = Math.Max(pinnedStart - 1, min);
+        return Math.Clamp(target, min, runningEnd);
     }
 
     private FrameworkElement? ContainerOf(DockItemViewModel item)
@@ -333,88 +555,7 @@ public partial class DockWindow : Window
         return index < 0 ? null : ItemsHost.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
     }
 
-    /// <summary>指示线当前可见吗（自检用）。</summary>
-    public bool IsDropIndicatorVisible => DropIndicator.Visibility == Visibility.Visible;
-
-    /// <summary>
-    /// 自检用：把「正在拖第一枚、准备插到第 index 个位置」的视觉状态直接摆出来。
-    /// 合成输入在这台机器上起不了 OLE 拖拽循环（试过 SetCursorPos + mouse_event，WPF 根本没进
-    /// DoDragDrop），所以拖拽反馈只能靠这样渲染一次，再靠截图确认幽灵与指示线的位置。
-    /// </summary>
-    /// <param name="index">指示线要落在第几个缝隙上。</param>
-    public void ShowDragFeedbackForSelfCheck(int index)
-    {
-        _dragging = true;
-
-        if (_viewModel.Items.Count > 0)
-        {
-            _dragSource = ContainerOf(_viewModel.Items[0]);
-            if (_dragSource is not null)
-            {
-                _dragSource.Opacity = DraggedGhostOpacity;
-            }
-        }
-
-        ShowDropIndicator(index);
-    }
-
-    /// <summary>自检用：收掉上面那个状态。</summary>
-    public void HideDragFeedbackForSelfCheck()
-    {
-        if (_dragSource is not null)
-        {
-            _dragSource.Opacity = 1;
-        }
-
-        _dragSource = null;
-        _dragging = false;
-        HideDropIndicator();
-    }
-
-    /// <summary>把插入位置的指示线挪到第 index 个缝隙上（0 = 最前，count = 最后）。</summary>
-    private void ShowDropIndicator(int index)
-    {
-        var total = ItemsHost.Items.Count;
-        if (total == 0 || _dropShift is null)
-        {
-            HideDropIndicator();
-            return;
-        }
-
-        var vertical = IsVertical;
-        var before = index < total;
-        var target = before ? index : total - 1;
-
-        if (ItemsHost.ItemContainerGenerator.ContainerFromIndex(target) is not FrameworkElement container)
-        {
-            HideDropIndicator();
-            return;
-        }
-
-        var edge = container.TranslatePoint(new Point(0, 0), Root);
-
-        if (vertical)
-        {
-            _dropShift.X = (Root.ActualWidth - DropIndicator.Width) / 2;
-            _dropShift.Y = (before ? edge.Y : edge.Y + container.ActualHeight) - 1;
-        }
-        else
-        {
-            _dropShift.X = (before ? edge.X : edge.X + container.ActualWidth) - 1;
-            _dropShift.Y = (Root.ActualHeight - DropIndicator.Height) / 2;
-        }
-
-        DropIndicator.Visibility = Visibility.Visible;
-    }
-
-    private void HideDropIndicator()
-    {
-        if (DropIndicator is not null)
-        {
-            DropIndicator.Visibility = Visibility.Collapsed;
-        }
-    }
-
+    /// <summary>Dock 是否竖排（靠左/靠右停靠时）。</summary>
     private bool IsVertical => _config.Current.DockPosition is "Left" or "Right";
 
     private void OnLauncherButtonClick(object sender, RoutedEventArgs e) => LauncherRequested?.Invoke(this, EventArgs.Empty);
@@ -651,32 +792,18 @@ public partial class DockWindow : Window
 
     private void OnChromeDragOver(object sender, DragEventArgs e)
     {
+        // 内部排序已经不走 OLE 拖拽（自己实现的实时换位），这里的 DragOver 只服务外部文件投放。
         SetDropEffect(e);
-
-        // 只有内部排序的拖拽才画插入线：从资源管理器拖文件进来是「添加」，没有插入位置可言。
-        if (e.Data.GetDataPresent(DockItemIdFormat))
-        {
-            ShowDropIndicator(DropIndexAt(e.GetPosition(ItemsHost)));
-        }
-        else
-        {
-            HideDropIndicator();
-        }
-
-        e.Handled = true;
     }
-
-    private void OnChromeDragLeave(object sender, DragEventArgs e) => HideDropIndicator();
 
     private static void SetDropEffect(DragEventArgs e)
     {
+        // 内部排序不走 OLE 拖拽（自己实现的实时换位），这里只认外部来源。
         e.Effects = e.Data.GetDataPresent(AppPathFormat)
             ? DragDropEffects.Copy
-            : e.Data.GetDataPresent(DockItemIdFormat)
-                ? DragDropEffects.Move
-                : e.Data.GetDataPresent(DataFormats.FileDrop)
-                    ? DragDropEffects.Link
-                    : DragDropEffects.None;
+            : e.Data.GetDataPresent(DataFormats.FileDrop)
+                ? DragDropEffects.Link
+                : DragDropEffects.None;
 
         e.Handled = true;
     }
@@ -722,62 +849,6 @@ public partial class DockWindow : Window
             e.Handled = true;
             return;
         }
-
-        if (!e.Data.GetDataPresent(DockItemIdFormat))
-        {
-            return;
-        }
-
-        var draggedId = e.Data.GetData(DockItemIdFormat) as string;
-        if (draggedId is null)
-        {
-            return;
-        }
-
-        var ids = _viewModel.Items.Select(item => item.Id).ToList();
-        var source = ids.IndexOf(draggedId);
-        if (source < 0)
-        {
-            return;
-        }
-
-        var insertAt = DropIndexAt(e.GetPosition(ItemsHost));
-        ids.RemoveAt(source);
-
-        // 先移除再插入：原来位于拖拽项之后的下标会整体前移一位。
-        if (insertAt > source)
-        {
-            insertAt--;
-        }
-
-        ids.Insert(Math.Clamp(insertAt, 0, ids.Count), draggedId);
-        await _viewModel.ReorderAsync(ids);
-        e.Handled = true;
-    }
-
-    /// <summary>返回插入点：第一个主轴中心在光标之后的容器下标，落在末尾时返回元素个数。</summary>
-    private int DropIndexAt(Point position)
-    {
-        var vertical = IsVertical;
-        var axis = vertical ? position.Y : position.X;
-
-        for (var index = 0; index < ItemsHost.Items.Count; index++)
-        {
-            if (ItemsHost.ItemContainerGenerator.ContainerFromIndex(index) is not FrameworkElement container)
-            {
-                continue;
-            }
-
-            var center = container.TranslatePoint(
-                new Point(container.ActualWidth / 2, container.ActualHeight / 2), ItemsHost);
-
-            if (axis < (vertical ? center.Y : center.X))
-            {
-                return index;
-            }
-        }
-
-        return ItemsHost.Items.Count;
     }
 
     /// <summary>
@@ -860,9 +931,6 @@ public partial class DockWindow : Window
 
         RootStrip.Orientation = vertical ? Orientation.Vertical : Orientation.Horizontal;
 
-        // 插入指示线跟着 Dock 的方向换形状：横着贴边是一条竖线，竖着贴边是一条横线。
-        DropIndicator.Width = vertical ? 34 : 2;
-        DropIndicator.Height = vertical ? 2 : 34;
         var buttonMargin = vertical ? new Thickness(0, 3, 0, 3) : new Thickness(3, 0, 3, 0);
         LauncherButton.Margin = buttonMargin;
         FolderButton.Margin = buttonMargin;
@@ -1001,6 +1069,14 @@ public partial class DockWindow : Window
         Slide.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(y, SlideDuration) { EasingFunction = ease });
     }
 
+    private void OnSystemPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SystemParameters.WorkArea))
+        {
+            Reposition();
+        }
+    }
+
     private void Reposition()
     {
         if (ActualWidth <= 0 || ActualHeight <= 0)
@@ -1010,10 +1086,19 @@ public partial class DockWindow : Window
 
         var work = SystemParameters.WorkArea;
 
+        // 「保留托盘」模式：任务栏被裁得只剩右侧托盘段，中间是纯壁纸 ——
+        // Dock 直接落到底边，跟右侧托盘站在同一条水平线上，不悬在工作区底边的半空里。
+        // 工作区仍被（裁过的）任务栏收缩着，所以这里必须用屏幕物理下沿。
+        var keepTray = _config.Current.TaskbarBarEnabled && _config.Current.TaskbarKeepTray;
+
         // 贴边 = 压到屏幕物理下沿，也就是盖在任务栏那一条上。任务栏图标默认靠左，
         // Dock 水平居中正好落在它的空白中段，既不挡图标也不占停靠区。
-        // 例外：贴桌面层时 Dock 排在任务栏后面，压到物理底边等于彻底看不见，只能退回工作区底边。
-        var flush = _config.Current.DockFlushToEdge && !_attachedToDesktop;
+        // 例外一：贴桌面层时 Dock 排在任务栏后面，压到物理底边等于彻底看不见，只能退回工作区底边。
+        // 例外二：「隐藏整个任务栏」的模式接管了整条底边，压到物理底边会盖在栏上面，同样退回工作区底边
+        //         （「保留托盘」模式中间没有栏，反而需要贴底 —— 见上面的 keepTray）。
+        var flush = !_attachedToDesktop
+                    && (keepTray
+                        || (_config.Current.DockFlushToEdge && !_config.Current.TaskbarBarEnabled));
         var gap = flush ? 0 : EdgeGap;
         var bottom = flush ? Math.Max(work.Bottom, SystemParameters.PrimaryScreenHeight) : work.Bottom;
 

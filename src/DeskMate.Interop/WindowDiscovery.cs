@@ -177,6 +177,77 @@ public static class WindowDiscovery
         return processId;
     }
 
+    private static bool IsCloaked(IntPtr hwnd)
+        => DwmGetWindowAttribute(hwnd, DwmwaCloaked, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
+
+    /// <summary>
+    /// 取指定进程「可以捞回主界面」的候选窗口，<b>包含隐藏的</b>，按面积从大到小。
+    /// 给托盘应用兜底：微信 4 这类常驻后台的程序，进程一直在、可见窗口一个没有，
+    /// 主窗口只是 hide() 掉了 —— 按普通切换找永远找不到，但可以从外面把它显示回来。
+    /// <para>
+    /// 判据比 <see cref="IsSwitchable"/> 宽（不看可见性）也比它严（必须有标题栏、面积要够大）：
+    /// 1×1 的常驻 widget、无标题的宿主窗一律不许进来 —— 那些 ShowWindow 出来只会是一块白框。
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<WindowInfo> GetRestorableWindowsOfProcess(uint processId)
+    {
+        var candidates = new List<WindowInfo>();
+
+        EnumWindows((hwnd, _) =>
+        {
+            GetWindowThreadProcessId(hwnd, out var rawProcessId);
+            var owner = OwnerProcessId(hwnd, rawProcessId);
+            if (owner != processId || !LooksLikeMainWindow(hwnd))
+            {
+                return true;
+            }
+
+            candidates.Add(new WindowInfo(hwnd, owner, ReadTitle(hwnd), ReadBounds(hwnd)));
+            return true;
+        }, IntPtr.Zero);
+
+        // 大的在前：主窗口几乎总是最大的那个。
+        candidates.Sort((a, b) => ((long)b.Bounds.Width * b.Bounds.Height)
+            .CompareTo((long)a.Bounds.Width * a.Bounds.Height));
+        return candidates;
+    }
+
+    /// <summary>像不像一个「主窗口」：带标题栏、不是子窗口/工具窗/owned 窗、没被 cloak、面积够大。</summary>
+    private static bool LooksLikeMainWindow(IntPtr hwnd)
+    {
+        if (IsCloaked(hwnd))
+        {
+            return false;
+        }
+
+        var style = WindowInterop.GetStyle(hwnd);
+        var exStyle = WindowInterop.GetExtendedStyle(hwnd);
+
+        if ((style & WindowInterop.WS_CHILD) == WindowInterop.WS_CHILD)
+        {
+            return false;
+        }
+
+        if ((exStyle & WindowInterop.WS_EX_TOOLWINDOW) == WindowInterop.WS_EX_TOOLWINDOW
+            && (exStyle & WindowInterop.WS_EX_APPWINDOW) != WindowInterop.WS_EX_APPWINDOW)
+        {
+            return false;
+        }
+
+        if (GetWindow(hwnd, GwOwner) != IntPtr.Zero)
+        {
+            return false;
+        }
+
+        if (!WindowInterop.HasCaption(hwnd))
+        {
+            return false;
+        }
+
+        var bounds = ReadBounds(hwnd);
+        return bounds.Width > 150 && bounds.Height > 150;
+    }
+
     /// <summary>当前前台窗口。</summary>
     public static IntPtr GetForeground() => WindowInterop.GetForeground();
 
@@ -209,7 +280,7 @@ public static class WindowDiscovery
         }
 
         // 被 DWM 遮罩的窗口（虚拟桌面切走的、挂起的 UWP）看着在，其实点不到。
-        if (DwmGetWindowAttribute(hwnd, DwmwaCloaked, out var cloaked, sizeof(int)) == 0 && cloaked != 0)
+        if (IsCloaked(hwnd))
         {
             return false;
         }

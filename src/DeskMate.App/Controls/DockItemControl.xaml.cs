@@ -1,5 +1,7 @@
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
+using DeskMate.App.ViewModels;
 
 namespace DeskMate.App.Controls;
 
@@ -32,7 +34,31 @@ public partial class DockItemControl : System.Windows.Controls.UserControl
     public bool IsPointerOver { get; private set; }
 
     /// <summary>构造 Dock 图标控件。</summary>
-    public DockItemControl() => InitializeComponent();
+    public DockItemControl()
+    {
+        InitializeComponent();
+        // 音乐控件靠滚轮切歌；其它图标不消费滚轮，让事件继续冒泡。
+        PreviewMouseWheel += OnItemPreviewMouseWheel;
+        // 音乐控件不是应用，右键菜单（启动/固定/移除）对它没有意义，整个摘掉。
+        DataContextChanged += OnItemDataContextChanged;
+    }
+
+    private void OnItemPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (DataContext is DockItemViewModel item && item.IsMusicWidget)
+        {
+            e.Handled = true;
+            item.ScrollMusic(e.Delta);
+        }
+    }
+
+    private void OnItemDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is DockItemViewModel item && item.IsMusicWidget)
+        {
+            GlyphButton.ContextMenu = null;
+        }
+    }
 
     /// <summary>悬停状态变化事件。</summary>
     public event RoutedEventHandler HoverChanged
@@ -40,6 +66,13 @@ public partial class DockItemControl : System.Windows.Controls.UserControl
         add => AddHandler(HoverChangedEvent, value);
         remove => RemoveHandler(HoverChangedEvent, value);
     }
+
+    /// <summary>
+    /// 把图标放大状态复位成原尺寸。拖动时指针一直压在这个图标上，悬停（1.35 倍）和按下（1.15 倍）
+    /// 的动画会停在放大后的值上，指针不离开就一直比原来大一圈。换一份干净的 ScaleTransform
+    /// 直接归 1，动画不会跟着过来；鼠标移开再移回来才会重新放大。
+    /// </summary>
+    public void ResetHoverScale() => GlyphButton.RenderTransform = new ScaleTransform(1, 1);
 
     protected override void OnMouseEnter(MouseEventArgs e)
     {

@@ -2,6 +2,7 @@ using DeskMate.App.ViewModels;
 using DeskMate.App.Views;
 using DeskMate.Core.Interfaces;
 using DeskMate.Core.Services;
+using DeskMate.Interop;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -58,6 +59,33 @@ public sealed class AppShell
         _config.ConfigChanged += OnConfigChanged;
         _theme.ApplyCurrent();
 
+        // 上一次异常退出（崩溃、被杀进程）可能把原生任务栏留在两种残局里：
+        // SW_HIDE（整条看不见）或区域裁剪（中间被裁掉）。这次启动一律兜底还原：
+        // 先显示回来、再把窗口区域复位成完整矩形。
+        // 「保留托盘」开着的话，裁剪轮询紧接着会重新裁，中间这一下无感。
+        var orphanTaskbar = WindowInterop.FindWindow("Shell_TrayWnd");
+        if (orphanTaskbar != IntPtr.Zero)
+        {
+            var restored = false;
+
+            if (!WindowInterop.IsVisible(orphanTaskbar))
+            {
+                _ = WindowInterop.SetWindowShown(orphanTaskbar, true);
+                restored = true;
+            }
+
+            if (WindowInterop.HasPartialRegion(orphanTaskbar))
+            {
+                _ = WindowInterop.SetWindowRegion(orphanTaskbar, IntPtr.Zero);
+                restored = true;
+            }
+
+            if (restored)
+            {
+                _logger.LogWarning("系统任务栏还留着上次退出时的隐藏/裁剪状态，这次启动已兜底还原");
+            }
+        }
+
         WireNotices();
         ShowDock();
         SyncHotkeys();
@@ -66,7 +94,21 @@ public sealed class AppShell
         // 启动台首开要先扫应用再逐个取图标，等用户按下快捷键才做就必然看到一排空格子。
         // 推到后台预热：扫描与取图都排在 STA 线程上，不占 UI 线程，也不拖 Dock 的启动。
         _ = WarmLauncherAsync();
+
+        // 面板首开那一次「建卡片 + 铺容器 + 首帧布局」（实测 200~300ms）正好压在开场动画中间，
+        // 动画会被整段吞掉，看着就是「啪」地出现。列表与布局都提到空闲里先做掉；
+        // 数目录里的文件是磁盘活，仍留到人真的打开面板时再开始。
+        WhenIdle(() =>
+        {
+            _services.GetRequiredService<FolderManagerViewModel>().PreWarm();
+            _services.GetRequiredService<FolderManagerWindow>().PreWarmLayout();
+        });
     }
+
+    /// <summary>UI 线程彻底空闲时做一件不紧急的事（预热一类）。</summary>
+    private void WhenIdle(Action work)
+        => System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.ApplicationIdle, work);
 
     /// <summary>
     /// 把各视图模型的 <c>UserNotice</c> 统一接到非模态浮层。
@@ -106,6 +148,9 @@ public sealed class AppShell
         try
         {
             await _services.GetRequiredService<LauncherViewModel>().LoadAsync();
+
+            // 磁贴就位后连布局一起预热：首开那 220ms 的测量与排列不该落在用户按下的那一刻。
+            WhenIdle(() => _services.GetRequiredService<LauncherWindow>().PreWarmLayout());
         }
         catch (Exception ex)
         {
@@ -262,6 +307,24 @@ public sealed class AppShell
             Step("遮罩");
         }
 
+        // 自建任务栏必须在退出前把原生任务栏彻底请回来，注销 AppBar 次之。
+        // 恢复链任何一步炸了都不能带崩收尾 —— 否则连「退出收尾」日志都打不出来，
+        // 而且剩下的窗口一个都关不掉。
+        if (Existing<TaskbarBarWindow>() is { } bar)
+        {
+            try
+            {
+                bar.Disable();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "自建任务栏退出恢复失败（任务栏可能残留隐藏状态，下次启动会兜底还原）");
+            }
+
+            bar.Close();
+            Step("自建任务栏");
+        }
+
         // 平时点 X 只是隐藏，退出时必须真关，否则隐藏窗口还占着资源。
         if (Existing<FolderManagerWindow>() is { } folders)
         {
@@ -309,11 +372,8 @@ public sealed class AppShell
         // 设置页改了任何一组快捷键都要重新注册，否则新按键组合不生效。
         SyncHotkeys();
 
-        // 遮罩的开关与宽度都只写在这里生效：Dock 自己会响应 ConfigChanged，不需要重算一遍可见性。
-        if (_services.GetService<TaskbarCoverWindow>() is { } cover)
-        {
-            cover.SetVisibility(_config.Current.TaskbarCoverEnabled && !_fullscreen.IsForegroundFullscreen());
-        }
+        // 遮罩与自建任务栏的开关都只在这里生效：可见性统一走 ApplyDockState（含互斥与全屏让路）。
+        ApplyDockState();
     }
 
     /// <summary>
@@ -405,10 +465,20 @@ public sealed class AppShell
         var visible = _userWantsDock && !hiddenByFullscreen;
         dock.SetVisibility(visible);
 
+        // 自建任务栏：功能开着且不在全屏时生效。「保留托盘」模式下栏本体不显示，
+        // 但要活着跑裁剪轮询（把原生任务栏裁到只剩右侧托盘区）。
+        var keepTray = _config.Current.TaskbarBarEnabled && _config.Current.TaskbarKeepTray;
+        var barActive = _config.Current.TaskbarBarEnabled && !hiddenByFullscreen;
+        if (_services.GetService<TaskbarBarWindow>() is { } bar || barActive)
+        {
+            _services.GetRequiredService<TaskbarBarWindow>().SetVisible(barActive, keepTray);
+        }
+
+        // 遮罩与自建任务栏互斥：栏接管了整条底边，遮罩没有存在的意义。
         // 遮罩是独立开关，但同样要在全屏时让路；它自己会判断有没有东西可盖。
         if (_services.GetService<TaskbarCoverWindow>() is { } cover)
         {
-            cover.SetVisibility(_config.Current.TaskbarCoverEnabled && !hiddenByFullscreen);
+            cover.SetVisibility(_config.Current.TaskbarCoverEnabled && !_config.Current.TaskbarBarEnabled && !hiddenByFullscreen);
         }
     }
 }

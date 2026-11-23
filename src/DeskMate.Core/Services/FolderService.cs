@@ -277,6 +277,23 @@ public sealed class FolderService : IFolderService
         => Task.Run(() => Measure(path, wantSize, _logger));
 
     /// <inheritdoc />
+    public Task<DateTime> LastModifiedAsync(string path) => Task.Run(() => LastModified(path, _logger));
+
+    /// <summary>目录自己的一次 stat：外部盘上不存在或没权限时给 MinValue，由调用方决定说什么。</summary>
+    public static DateTime LastModified(string path, ILogger? logger = null)
+    {
+        try
+        {
+            return DirectoryExists(path) ? Directory.GetLastWriteTime(path) : DateTime.MinValue;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug(ex, "读取目录时间失败 {Path}", path);
+            return DateTime.MinValue;
+        }
+    }
+
+    /// <inheritdoc />
     public IReadOnlyList<FolderGroup> GetGroups()
         => _config.Current.Groups.OrderBy(group => group.Order).ToList();
 

@@ -97,6 +97,11 @@ public partial class FolderManagerWindow : Window
             WindowState = WindowState.Normal;
         }
 
+        // 内容层先压到 0 再 Show：窗口是单例，隐藏时留着上一次画好的整屏内容，
+        // 先 Show 后淡入会让那一帧以不透明的样子亮一下（看着像闪出旧界面）。
+        // 淡入本身仍要在 Show 之后挂 —— 没进视觉树的时钟不会推进，提前挂等于白跑。
+        Panel.Opacity = 0;
+
         Show();
         Activate();
 
@@ -110,7 +115,13 @@ public partial class FolderManagerWindow : Window
         // 每次显示都重新校验一遍路径与文件数：窗口是单例、关掉只是隐藏，
         // 隔几小时再打开时卡片上的数据不该还是旧的。
         _ = ReloadSafelyAsync();
+
+        // 路径框跟着当前语境走一遍（上次关掉面板时人在哪一层，打开就显示哪一层）。
+        _viewModel.SyncPathBox();
     }
+
+    /// <summary>首开前把内容树先量排一遍：那一次布局实测 300ms，别让它吃掉开场动画。</summary>
+    public void PreWarmLayout() => WindowWarmup.PreWarmLayout(this, new Size(Width, Height));
 
     /// <summary>
     /// 淡入的兜底。上一次淡出的时钟如果还接管着 <c>Opacity</c>，赋本地值是不生效的，
@@ -200,6 +211,14 @@ public partial class FolderManagerWindow : Window
         {
             // 资源管理器的手感：F5 = 重数这一层（没在浏览时就是空操作）。
             _viewModel.RefreshBrowseCommand.Execute(null);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.L && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        {
+            // 资源管理器同一个键：跳到地址栏。焦点在不在输入框里都要能用（从搜索框切过去是常态）。
+            FocusPathBox();
             e.Handled = true;
             return;
         }
@@ -832,6 +851,79 @@ public partial class FolderManagerWindow : Window
     /// 输入框里、按钮上（回车是激活按钮）一律不抢；回车抢了按钮就是「Tab 到星星按回车没反应」。
     /// </para>
     /// </summary>
+    /// <summary>
+    /// 地址栏那一格：点空白处就转成可编辑（资源管理器同一只手）。
+    /// 点在面包屑段或复制按钮上时不算 —— 那一下本来就有自己的事要做。
+    /// </summary>
+    private void OnAddressBarClick(object sender, MouseButtonEventArgs e)
+    {
+        if (IsButtonHit(e.OriginalSource as DependencyObject)
+            || e.OriginalSource is DependencyObject source && IsInsidePathBox(source))
+        {
+            return;
+        }
+
+        FocusPathBox();
+    }
+
+    private bool IsInsidePathBox(DependencyObject source)
+    {
+        DependencyObject? current = source;
+
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, PathBox))
+            {
+                return true;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
+    /// <summary>地址栏里按回车 = 跳过去；按 Esc = 退出编辑，那一格换回面包屑。</summary>
+    private void OnPathBoxKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            Keyboard.ClearFocus();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key != Key.Enter && e.Key != Key.Return)
+        {
+            return;
+        }
+
+        _viewModel.GoToPathBoxCommand.Execute(null);
+
+        // 跳完退出编辑态：资源管理器也是这个收场 —— 地址栏回到面包屑，人接着看列表。
+        Keyboard.ClearFocus();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// 焦点进出地址栏时告诉视图模型「现在有人在打字」。
+    /// 不这么做的话：磁盘监听一刷新、或焦点走到别的条目上，框里刚粘了一半的路径就被盖掉。
+    /// <para>
+    /// 判据取 <c>e.NewFocus</c> 而不是 <c>PathBox.IsKeyboardFocusWithin</c>：后者在 LostKeyboardFocus
+    /// 那一刻还没换手，读出来仍是 true —— 于是「编辑中」永远撤不掉，地址栏再也不跟着现场走（自检抓到过）。
+    /// </para>
+    /// </summary>
+    private void OnPathBoxFocusChanged(object sender, KeyboardFocusChangedEventArgs e)
+        => _viewModel.IsPathBoxEditing = ReferenceEquals(e.NewFocus, PathBox);
+
+    /// <summary>聚焦路径框并全选（Ctrl+L，与资源管理器同一个键）。</summary>
+    private void FocusPathBox()
+    {
+        PathBox.Focus();
+        Keyboard.Focus(PathBox);
+        PathBox.SelectAll();
+    }
+
     private bool TryHandleNavigationKey(KeyEventArgs e, bool typing)
     {
         if (typing)

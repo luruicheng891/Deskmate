@@ -14,3 +14,6 @@ tmp/
 # 发布输出
 publish/
 *.pubxml
+
+# 参考用的第三方项目，只在本机放着看，不提交
+AF-Media-Bar-main/

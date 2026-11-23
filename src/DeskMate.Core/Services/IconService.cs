@@ -21,6 +21,16 @@ public sealed class IconService : IIconService
     private static readonly int[] SizeBuckets = [16, 32, 48, 64, 96, 128, 256];
 
     private readonly ConcurrentDictionary<string, BitmapSource?> _cache = new();
+
+    /// <summary>同一次刷新里几十行问同一个类型：在途的那一趟要共用，别排几十遍 Shell。</summary>
+    private readonly ConcurrentDictionary<string, Task<BitmapSource?>> _inFlight = new();
+
+    /// <summary>
+    /// 图标跟着文件自己走、而不是跟着扩展名的少数类型：这些按完整路径缓存，
+    /// 其余类型同一种扩展名在资源管理器里就是同一个图标，按扩展名共用一张。
+    /// </summary>
+    private static readonly string[] PerFileExtensions = [".exe", ".lnk", ".ico", ".dll", ".msi"];
+
     private readonly StaScheduler _sta;
     private readonly ILogger<IconService> _logger;
 
@@ -54,7 +64,60 @@ public sealed class IconService : IIconService
     }
 
     /// <inheritdoc />
-    public void ClearCache() => _cache.Clear();
+    public void ClearCache()
+    {
+        _cache.Clear();
+        _inFlight.Clear();
+    }
+
+    /// <inheritdoc />
+    public Task<BitmapSource?> GetTypeIconAsync(string path, bool isDirectory, int size = 32)
+    {
+        var normalized = Expand(path);
+        if (normalized.Length == 0)
+        {
+            return Task.FromResult<BitmapSource?>(null);
+        }
+
+        var pixelSize = ExtractionSizeFor(size);
+        var extension = Path.GetExtension(normalized);
+
+        // 目录共用一张文件夹图标；文档类按扩展名共用；exe/lnk 这类图标跟着文件自己走的按路径。
+        var subject = isDirectory
+            ? "directory"
+            : PerFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)
+                ? normalized
+                : extension;
+
+        var key = $"type|{pixelSize}|{subject.ToUpperInvariant()}";
+        if (_cache.TryGetValue(key, out var cached))
+        {
+            return Task.FromResult(cached);
+        }
+
+        return _inFlight.GetOrAdd(key, _ => ExtractTypeAndCacheAsync(normalized, isDirectory, key, pixelSize));
+    }
+
+    private async Task<BitmapSource?> ExtractTypeAndCacheAsync(string path, bool isDirectory, string key, int size)
+    {
+        try
+        {
+            var icon = await _sta.RunAsync(() => ExtractType(path, isDirectory, size));
+            _cache[key] = icon;
+            return icon;
+        }
+        finally
+        {
+            _inFlight.TryRemove(key, out _);
+        }
+    }
+
+    /// <summary>问 Shell 要资源管理器对这一类显示的那个图标：目录给文件夹，文件给关联类型的默认图标。</summary>
+    private BitmapSource? ExtractType(string path, bool isDirectory, int size)
+    {
+        var hicon = ShellIcon.ExtractIconHandle(path, size >= 24);
+        return hicon == IntPtr.Zero ? null : BitmapFromHandle(hicon, path);
+    }
 
     /// <summary>把「界面里多大」换算成「该去取哪一档」：先乘 DPI，再向上取整到最近的一档。</summary>
     private static int ExtractionSizeFor(int dipSize)
@@ -110,6 +173,12 @@ public sealed class IconService : IIconService
             return null;
         }
 
+        return BitmapFromHandle(hicon, path);
+    }
+
+    /// <summary>HICON → 已 Freeze 的 BitmapSource；句柄无论成败都要还回去。</summary>
+    private BitmapSource? BitmapFromHandle(IntPtr hicon, string pathForLog)
+    {
         try
         {
             var bitmap = Imaging.CreateBitmapSourceFromHIcon(
@@ -121,7 +190,7 @@ public sealed class IconService : IIconService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "HICON 转 BitmapSource 失败：{Path}", path);
+            _logger.LogWarning(ex, "HICON 转 BitmapSource 失败：{Path}", pathForLog);
             return null;
         }
         finally

@@ -25,7 +25,7 @@ public class RowSelectionAndWriteTests : IDisposable
         _config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(_config, NullLogger<FolderService>.Instance);
         _viewModel = new FolderManagerViewModel(
-            _folders, _launcher, new FakeDesktopFileService(), _files, _config, NullLogger<FolderManagerViewModel>.Instance);
+            _folders, _launcher, new FakeDesktopFileService(), _files, new FakeIconService(), _config, NullLogger<FolderManagerViewModel>.Instance);
     }
 
     public void Dispose() => _temp.Dispose();

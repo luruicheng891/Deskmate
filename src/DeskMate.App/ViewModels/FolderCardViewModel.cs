@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Windows.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -73,6 +74,28 @@ public sealed partial class PreviewEntry : ObservableObject, IFocusable
     /// <summary>是不是正在右边看内容的那一项（列表与内容同时出现时，得看得出选中了谁）。</summary>
     [ObservableProperty]
     private bool _isSelected;
+
+    /// <summary>Windows 里这一类的默认图标（目录=文件夹，文件=关联类型）；没取回来前界面画字形占位。</summary>
+    [ObservableProperty]
+    private BitmapSource? _icon;
+
+    /// <summary>取类型图标。建行时排上；图标服务按类型缓存，一屏同类型只问一次 Shell。</summary>
+    public async Task LoadIconAsync(int size)
+    {
+        if (!HasPath)
+        {
+            return;
+        }
+
+        try
+        {
+            Icon = await _owner.TypeIconAsync(Path, IsDirectory, size);
+        }
+        catch (Exception)
+        {
+            // 取不到就留占位字形，和启动台「图标没取到画字母」同一口径。
+        }
+    }
 
     /// <summary>键盘焦点在这一行上（方向键走过来的，或鼠标点过它）。</summary>
     [ObservableProperty]
@@ -153,14 +176,15 @@ public sealed partial class GroupTabViewModel : ObservableObject
     {
         _owner = owner;
         Id = id;
-        Name = name;
+        _name = name;
     }
 
     /// <summary>"all" / "none" / 分组 Id / "desktop:image" 这类桌面分类。</summary>
     public string Id { get; }
 
-    /// <summary>显示名（分组与桌面分类都带数量）。</summary>
-    public string Name { get; }
+    /// <summary>显示名（分组与桌面分类都带数量）。可观察：数量变了要能把同一枚 Tab 就地改掉。</summary>
+    [ObservableProperty]
+    private string _name;
 
     [ObservableProperty]
     private bool _isSelected;
@@ -237,6 +261,23 @@ public sealed partial class FolderCardViewModel : ObservableObject, IFocusable
     [ObservableProperty]
     private bool _isFocused;
 
+    /// <summary>Windows 的文件夹图标；没取回来前界面画字形占位。</summary>
+    [ObservableProperty]
+    private BitmapSource? _icon;
+
+    /// <summary>取文件夹图标。建卡时排上；图标服务按类型缓存，几十张卡只问一次 Shell。</summary>
+    public async Task LoadIconAsync(int size)
+    {
+        try
+        {
+            Icon = await _owner.TypeIconAsync(RealPath, isDirectory: true, size);
+        }
+        catch (Exception)
+        {
+            // 取不到就留占位字形，和启动台「图标没取到画字母」同一口径。
+        }
+    }
+
     string IFocusable.FocusPath => RealPath;
 
     // 卡片本来就只有目录（文件走的是另外两种条目）。
@@ -269,41 +310,6 @@ public sealed partial class FolderCardViewModel : ObservableObject, IFocusable
         OnPropertyChanged(nameof(CanCreate));
         OnPropertyChanged(nameof(Tip));
     }
-
-    [ObservableProperty]
-    private int _fileCount;
-
-    [ObservableProperty]
-    private bool _isCountLoading = true;
-
-    /// <summary>
-    /// 数不出来（没权限、盘暂时不可达）。这一条必须和「空」分开：
-    /// 一个目录被标成「空」，用户的解读往往是「我的文件没了」。
-    /// </summary>
-    [ObservableProperty]
-    private bool _isCountFailed;
-
-    /// <summary>计数未回来时显示「统计中…」，超过 10000 显示「10000+」。</summary>
-    public string CountText => IsCountLoading
-        ? "统计中…"
-        : IsCountFailed
-            ? "读不到"
-            : FileCount switch
-            {
-                <= 0 => "空",
-                >= 10000 => "10000+",
-                _ => $"{FileCount} 个文件",
-            };
-
-    partial void OnFileCountChanged(int value)
-    {
-        IsCountLoading = false;
-        OnPropertyChanged(nameof(CountText));
-    }
-
-    partial void OnIsCountLoadingChanged(bool value) => OnPropertyChanged(nameof(CountText));
-
-    partial void OnIsCountFailedChanged(bool value) => OnPropertyChanged(nameof(CountText));
 
     partial void OnDisplayNameChanged(string value) => OnPropertyChanged(nameof(InitialLetter));
 

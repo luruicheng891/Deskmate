@@ -92,6 +92,28 @@ public static class WindowInterop
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr FindWindowW(string? lpClassName, string? lpWindowName);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string? lpClassName, string? lpWindowName);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+
+    [DllImport("user32.dll")]
+    private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowRgn(IntPtr hwnd, IntPtr region);
+
+    [DllImport("gdi32.dll")]
+    private static extern int GetRgnBox(IntPtr region, out WinRect rect);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    private const int NullRegion = 1;
+    private const int SimpleRegion = 2;
+    private const int ComplexRegion = 3;
+
     /// <summary>读取扩展样式位。</summary>
     public static long GetExtendedStyle(IntPtr hwnd) => GetWindowLongPtrW(hwnd, GWL_EXSTYLE).ToInt64();
 
@@ -155,6 +177,114 @@ public static class WindowInterop
 
     /// <summary>按窗口类名查找顶层窗口。</summary>
     public static IntPtr FindWindow(string className) => FindWindowW(className, null);
+
+    /// <summary>任务栏右侧托盘区子窗口（时钟、托盘图标、输入法指示都在它里面）。Win11 下仍存在。</summary>
+    public const string TrayNotifyClassName = "TrayNotifyWnd";
+
+    /// <summary>
+    /// 在父窗口里按类名找子窗口。给任务栏找 <see cref="TrayNotifyClassName"/> 用。
+    /// </summary>
+    public static IntPtr FindChildWindow(IntPtr parent, string className)
+        => parent != IntPtr.Zero ? FindWindowExW(parent, IntPtr.Zero, className, null) : IntPtr.Zero;
+
+    /// <summary>
+    /// 裁剪窗口的可见区域（区域是<b>窗口内坐标</b>，相对窗口左上角，不是屏幕坐标）。
+    /// 裁掉的部分一帧都不渲染、鼠标也点不到 —— 不是遮挡，是物理上不存在；
+    /// 传 <see cref="IntPtr.Zero"/> 还原完整区域。区域句柄在设置成功后归系统管，不用手动释放。
+    /// </summary>
+    public static bool SetWindowRegion(IntPtr hwnd, IntPtr region)
+        => hwnd != IntPtr.Zero && SetWindowRgn(hwnd, region, true) != 0;
+
+    /// <summary>创建矩形区域，配 <see cref="SetWindowRegion"/> 用。</summary>
+    public static IntPtr CreateRectRegion(int left, int top, int right, int bottom)
+        => CreateRectRgn(left, top, right, bottom);
+
+    /// <summary>
+    /// 窗口是否带着「比自身小」的可见区域 —— 异常退出残留的裁剪就是这个形态。
+    /// 没设过区域（ERROR）、区域盖满整窗都算没残留；空区域（整个被裁没）也算残留。
+    /// </summary>
+    public static bool HasPartialRegion(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        // GetWindowRgn 需要一个已初始化的区域来接收结果。
+        var probe = CreateRectRgn(0, 0, 0, 0);
+        if (probe == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            var type = GetWindowRgn(hwnd, probe);
+            if (type is not (NullRegion or SimpleRegion or ComplexRegion))
+            {
+                return false; // ERROR：压根没设过区域
+            }
+
+            if (type == NullRegion || GetRgnBox(probe, out var box) == 0 || !GetWindowRect(hwnd, out var window))
+            {
+                return true; // 整个被裁没，或区域框都取不到 —— 当残留处理
+            }
+
+            // 区域框是窗口内坐标，跟窗口矩形比要用窗口自己的宽高。
+            return box.Left > 0 || box.Top > 0
+                || box.Right < window.Width || box.Bottom < window.Height;
+        }
+        finally
+        {
+            _ = DeleteObject(probe);
+        }
+    }
+
+    private const int DwmwaCloak = 13;
+
+    private const int SwHide = 0;
+    private const int SwShowNoActivate = 4;
+    private const int SwRestore = 9;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    /// <summary>
+    /// 用 DWM Cloak 把窗口整个「藏进合成器」：窗口在系统眼里还在原位（IsVisible 仍为真、
+    /// 布局照常），但一帧都不会渲染，鼠标也点不到。与挂起的 UWP 窗口用的是同一个机制。
+    /// <para>
+    /// 返回 DWM 的 HRESULT（0 = 成功）。实测外壳会对部分系统窗口拒绝 cloak（比如任务栏），
+    /// 调用方要按失败兜底，别拿返回值之外的任何假设当真。
+    /// </para>
+    /// </summary>
+    public static int SetCloaked(IntPtr hwnd, bool cloaked)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return -1;
+        }
+
+        var value = cloaked ? 1 : 0;
+        return DwmSetWindowAttribute(hwnd, DwmwaCloak, ref value, sizeof(int));
+    }
+
+    /// <summary>
+    /// 显示/隐藏顶层窗口。隐藏用 SW_HIDE（不渲染、不收输入），恢复用 SW_SHOWNOACTIVATE
+    /// （回来但不抢焦点）。返回调用前窗口是否可见。
+    /// <para>
+    /// 当前用途：cloak 被外壳拒绝时，把任务栏窗口整个 SW_HIDE —— 外壳对它的任何挪位、
+    /// 粘性显示都渲染不出来；它若调 ShowWindow 重新显示，调用方的窗口事件会立刻再藏回去。
+    /// </para>
+    /// </summary>
+    public static bool SetWindowShown(IntPtr hwnd, bool shown)
+        => hwnd != IntPtr.Zero && ShowWindow(hwnd, shown ? SwShowNoActivate : SwHide);
+
+    /// <summary>按窗口自己上一次的状态恢复显示（顺带解除最小化）。返回调用前是否可见。</summary>
+    public static bool SetWindowRestored(IntPtr hwnd)
+        => hwnd != IntPtr.Zero && ShowWindow(hwnd, SwRestore);
 
     /// <summary>
     /// 系统认为「两下算一次双击」的时间窗（毫秒，默认 500）。

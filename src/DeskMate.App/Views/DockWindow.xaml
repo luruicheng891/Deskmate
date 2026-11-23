@@ -105,21 +105,21 @@
             <TranslateTransform x:Name="Slide" />
         </Grid.RenderTransform>
 
-        <!-- 背景与阴影单独一层：Effect 会作用于整个子树，放进内容层会把图标一起糊掉。 -->
+        <!-- 背景与阴影单独一层：Effect 会作用于整个子树，放进内容层会把图标一起糊掉。
+             两层的外边距都跟着 ShellMargin 走：上边多出来的是透明余量，给悬停放大向上生长用（窗口按布局尺寸裁内容）。 -->
         <Border x:Name="Backdrop"
-                Margin="8"
+                Margin="{Binding ShellMargin}"
                 CornerRadius="16"
                 Background="{DynamicResource DockBackgroundBrush}" />
 
         <Border x:Name="Chrome"
-                Margin="8"
+                Margin="{Binding ShellMargin}"
                 Padding="8,6"
                 AllowDrop="True"
                 Background="Transparent"
                 Drop="OnChromeDrop"
                 DragOver="OnChromeDragOver"
-                DragEnter="OnChromeDragEnter"
-                DragLeave="OnChromeDragLeave">
+                DragEnter="OnChromeDragEnter">
             <StackPanel x:Name="RootStrip" Orientation="Horizontal">
 
                 <!-- 最左：启动台 -->
@@ -173,20 +173,5 @@
                 </Button>
             </StackPanel>
         </Border>
-
-        <!--
-          拖拽排序时的插入位置指示线。位置全靠 RenderTransform 改，元素本身不参与布局，
-          所以拖的时候不会引起任何重排（改 Margin 会，那是这条 Dock 一直在避免的）。
-        -->
-        <Rectangle x:Name="DropIndicator"
-                   Width="2"
-                   Height="34"
-                   HorizontalAlignment="Left"
-                   VerticalAlignment="Top"
-                   RadiusX="1"
-                   RadiusY="1"
-                   Fill="{DynamicResource AccentBrush}"
-                   Visibility="Collapsed"
-                   IsHitTestVisible="False" />
     </Grid>
 </Window>

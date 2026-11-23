@@ -240,6 +240,33 @@
                                            VerticalAlignment="Center" />
                             </Grid>
 
+                            <!-- 三档就在滑条下面：多数人只想「大一点 / 小一点」，不想读像素。
+                                 亮不亮判的是 DockIconSize 真等于那个值，所以滑条拖到 44 时「中」跟着亮。 -->
+                            <StackPanel Orientation="Horizontal" Margin="130,10,0,0">
+                                <RadioButton Style="{StaticResource TabPillStyle}"
+                                             Content="小"
+                                             ToolTip="图标边长 32"
+                                             IsChecked="{Binding DockIconSize, Converter={StaticResource Equals}, ConverterParameter=32, Mode=OneWay}"
+                                             Command="{Binding SetDockIconSizeCommand}"
+                                             CommandParameter="32" />
+                                <RadioButton Style="{StaticResource TabPillStyle}"
+                                             Content="中"
+                                             ToolTip="图标边长 44（默认）"
+                                             IsChecked="{Binding DockIconSize, Converter={StaticResource Equals}, ConverterParameter=44, Mode=OneWay}"
+                                             Command="{Binding SetDockIconSizeCommand}"
+                                             CommandParameter="44" />
+                                <RadioButton Style="{StaticResource TabPillStyle}"
+                                             Content="大"
+                                             ToolTip="图标边长 60"
+                                             IsChecked="{Binding DockIconSize, Converter={StaticResource Equals}, ConverterParameter=60, Mode=OneWay}"
+                                             Command="{Binding SetDockIconSizeCommand}"
+                                             CommandParameter="60" />
+                                <TextBlock Text="滑条可细调 24~80"
+                                           Margin="10,0,0,0"
+                                           VerticalAlignment="Center"
+                                           Style="{StaticResource CaptionTextStyle}" />
+                            </StackPanel>
+
                             <Grid Margin="0,14,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="130" />
@@ -285,9 +312,7 @@
                             <CheckBox Content="遮住任务栏左边（开始按钮与应用图标）"
                                       Style="{StaticResource CheckStyle}"
                                       Margin="0,16,0,0"
-                                      IsChecked="{Binding TaskbarCoverEnabled, Mode=TwoWay}" />
-
-                            <Grid Margin="0,10,0,0"
+                                      IsChecked="{Binding TaskbarCoverEnabled, Mode=TwoWay}" />                            <Grid Margin="0,10,0,0"
                                   Visibility="{Binding TaskbarCoverEnabled, Converter={StaticResource BoolToVis}}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="130" />
@@ -316,6 +341,27 @@
                             <TextBlock Style="{StaticResource CaptionTextStyle}"
                                        Margin="0,12,0,0"
                                        Text="说明：Dock 使用 WPF 分层透明窗口，系统不允许这类窗口做真实背景采样，因此「毛玻璃」是圆角 + 柔光的近似效果。" />
+
+                            <CheckBox Content="用自建任务栏顶替系统任务栏（时间 · 输入法 · 网络 · 音量）"
+                                      Style="{StaticResource CheckStyle}"
+                                      Margin="0,16,0,0"
+                                      IsChecked="{Binding TaskbarBarEnabled, Mode=TwoWay}" />
+
+                            <CheckBox Content="保留右侧系统托盘：只隐藏中间的应用图标（时钟 · 托盘图标 · 输入法指示照常可用）"
+                                      Style="{StaticResource CheckStyle}"
+                                      Margin="0,10,0,0"
+                                      IsEnabled="{Binding TaskbarBarEnabled}"
+                                      IsChecked="{Binding TaskbarKeepTray, Mode=TwoWay}" />
+
+                            <TextBlock Style="{StaticResource CaptionTextStyle}"
+                                       Margin="0,8,0,0"
+                                       Visibility="{Binding TaskbarBarEnabled, Converter={StaticResource BoolToVis}}"
+                                       Text="开启后 DeskMate 会把系统任务栏切到自动隐藏（退出 DeskMate 时自动恢复原状），并在屏幕右下角（与 Dock 同一条底边线上）放一个小条：输入法状态（单击中英切换）、网络（单击打开系统网络设置）、音量（滚轮调节、单击静音）与时间日期。期间原生任务栏不会再因鼠标贴边而滑出；需要托盘图标时，关掉本开关即可。与上面的遮罩互斥。" />
+
+                            <TextBlock Style="{StaticResource CaptionTextStyle}"
+                                       Margin="0,8,0,0"
+                                       Visibility="{Binding TaskbarKeepTray, Converter={StaticResource BoolToVis}}"
+                                       Text="把原生任务栏窗口裁成只剩右侧托盘那一段（是裁掉不是盖住）：中间的应用图标物理消失，动态壁纸原样透出来，不会被任何色块挡住；时钟、托盘图标、输入法指示照常可用。此模式下右下角自建小条不显示，自动隐藏保持你自己的系统设置 —— 鼠标贴底边唤出的也只是托盘那一段。中间区域点击会落到桌面（和任务栏不存在一样）。" />
                         </StackPanel>
                     </Border>
                 </StackPanel>

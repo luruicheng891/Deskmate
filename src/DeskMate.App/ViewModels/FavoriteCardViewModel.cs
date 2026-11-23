@@ -1,3 +1,4 @@
+using System.Windows.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -32,6 +33,28 @@ public sealed partial class FavoriteCardViewModel : ObservableObject, IFocusable
     [ObservableProperty]
     private bool _isDirectory;
 
+    /// <summary>Windows 里这一类的默认图标；详情回来之前（还不知道是目录还是文件）界面画占位。</summary>
+    [ObservableProperty]
+    private BitmapSource? _icon;
+
+    /// <summary>取类型图标。详情填完 IsDirectory 之后排上。</summary>
+    public async Task LoadIconAsync(int size)
+    {
+        if (!IsValid)
+        {
+            return;
+        }
+
+        try
+        {
+            Icon = await _owner.TypeIconAsync(FullPath, IsDirectory, size);
+        }
+        catch (Exception)
+        {
+            // 取不到就留字形/角标占位，和启动台「图标没取到画字母」同一口径。
+        }
+    }
+
     /// <summary>键盘焦点在这张收藏卡片上。</summary>
     [ObservableProperty]
     private bool _isFocused;
@@ -51,10 +74,6 @@ public sealed partial class FavoriteCardViewModel : ObservableObject, IFocusable
     /// <summary>角标：目录用文件夹字形，文件用扩展名（ZIP / C / DOCX）。</summary>
     [ObservableProperty]
     private string _badge = string.Empty;
-
-    /// <summary>所在目录，副标题用。</summary>
-    public string Location => System.IO.Path.GetDirectoryName(
-        FullPath.TrimEnd('\\', '/')) ?? string.Empty;
 
     /// <summary>收藏页上的星星永远是实心的，点一下就是取消收藏。</summary>
     public string StarGlyph => "\uE735";

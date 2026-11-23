@@ -29,7 +29,7 @@ public class KeyboardFocusTests : IDisposable
         var config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(config, NullLogger<FolderService>.Instance);
         _viewModel = new FolderManagerViewModel(
-            _folders, _launcher, new FakeDesktopFileService(), new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
+            _folders, _launcher, new FakeDesktopFileService(), new FakeFileOperations(), new FakeIconService(), config, NullLogger<FolderManagerViewModel>.Instance);
     }
 
     public void Dispose() => _temp.Dispose();

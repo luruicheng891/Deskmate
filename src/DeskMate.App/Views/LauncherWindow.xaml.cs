@@ -42,7 +42,9 @@ public partial class LauncherWindow : Window
     private readonly IConfigService _config;
     private readonly ILogger<LauncherWindow> _logger;
     private int _visibilityGeneration;
-    private bool _loadedOnce;
+
+    /// <summary>用户真的呼出过（预热就不必再做了，也免得预热的收尾把真界面收掉）。</summary>
+    private bool _openedByUser;
     private bool _contextMenuOpen;
     private Point _dragStart;
     private AppTileViewModel? _dragCandidate;
@@ -70,17 +72,9 @@ public partial class LauncherWindow : Window
     public void ShowLauncher()
     {
         _visibilityGeneration++;
+        _openedByUser = true;
 
-        // 占主屏 70% 并居中。用的是 DIP 尺寸，与 WPF 的 Left/Top/Width/Height 同一坐标系。
-        var screenWidth = SystemParameters.PrimaryScreenWidth;
-        var screenHeight = SystemParameters.PrimaryScreenHeight;
-
-        Width = Math.Max(720, screenWidth * PanelRatio);
-        Height = Math.Max(460, screenHeight * PanelRatio);
-
-        // 位置取整：半个像素的偏移会让整窗内容都画在像素缝上，图标和文字看着就是糊的。
-        Left = Math.Round(Math.Max(0, (screenWidth - Width) / 2));
-        Top = Math.Round(Math.Max(0, (screenHeight - Height) / 2));
+        ApplyPanelGeometry();
 
         // 弹出方向以「鼠标当下所在的位置」为锚点，所以从 Dock 图标点出来和按快捷键呼出，
         // 面板都是朝各自那个方向长出来的。必须在 Show 之前问，Show 之后焦点/光标可能已经变了。
@@ -98,8 +92,17 @@ public partial class LauncherWindow : Window
         // （浅色主题 #F7F8FA）。不覆盖的话整块面板就是一张白纸，底下抓好的玻璃直接被盖住。
         ApplyTransparency();
 
-        // 从点击位置长出来：缩放 + 淡入 + 轻微上浮，收尾一点回弹。
-        WindowTransition.PlayLauncher(this, Panel, origin, showing: true);
+        // 开场动画等真出帧之后再挂：首帧可能被「窗口刚从隐藏里回来」拖住一百多毫秒，
+        // 而动画走的是真实时间 —— 挂在 Show 上就是让人看半截开场。
+        var generation = _visibilityGeneration;
+        WindowWarmup.WhenNextFrame(() =>
+        {
+            if (generation == _visibilityGeneration)
+            {
+                WindowTransition.PlayLauncher(this, Panel, origin, showing: true);
+            }
+        });
+
         ApplyFrostedBackdrop(raw);
 
         Activate();
@@ -107,15 +110,91 @@ public partial class LauncherWindow : Window
         Keyboard.Focus(SearchBox);
         SearchBox.SelectAll();
 
-        if (_loadedOnce)
+        // 启动后的预热已经把列表与图标备好的话，这里只后台对齐现场。再走一遍载入会把整片磁贴重铺，
+        // 实测正好砸在开场动画中间 —— 400ms 里只出得到 11 帧，看着就是「卡一下才长出来」。
+        if (_viewModel.IsLoaded)
         {
             // 每次呼出都在后台对齐一次现场：装完新软件不必重启 DeskMate 就能出现在这里。
             _ = _viewModel.RefreshAsync(report: false);
             return;
         }
 
-        _loadedOnce = true;
         _ = LoadSafelyAsync();
+    }
+
+    /// <summary>
+    /// 面板尺寸：主屏的 70%，带下限（需求：不铺满全屏）。呼出与首开预热都算这一个，
+    /// 两边尺寸不一样就等于预热白做。
+    /// </summary>
+    private static Size PanelSize() => new(
+        Math.Max(720, SystemParameters.PrimaryScreenWidth * PanelRatio),
+        Math.Max(460, SystemParameters.PrimaryScreenHeight * PanelRatio));
+
+    /// <summary>按屏幕 70% 居中摆好面板（位置取整：半个像素的偏移会让内容画在像素缝上）。</summary>
+    private void ApplyPanelGeometry()
+    {
+        var size = PanelSize();
+        Width = size.Width;
+        Height = size.Height;
+        Left = Math.Round(Math.Max(0, (SystemParameters.PrimaryScreenWidth - Width) / 2));
+        Top = Math.Round(Math.Max(0, (SystemParameters.PrimaryScreenHeight - Height) / 2));
+    }
+
+    /// <summary>
+    /// 首开前的预热：量排布局之后，再以「全透明 + 不激活」真渲染一次。
+    /// <para>
+    /// 分层窗口（AllowsTransparency=True）的头一帧不只是布局：DWM 的重定向表面要建、
+    /// 阴影那层着色器要现编译，实测 150~165ms。只做 Measure/Arrange 一点也省不掉 ——
+    /// 它落在用户按下的那一刻，就是「屏幕先定住两百毫秒，然后面板啪地出现」。
+    /// 整窗 Opacity=0 的分层窗口在屏幕上是什么都没有的，渲染完成立刻收掉。
+    /// </para>
+    /// <para>
+    /// 收尾走「渲染完成 + 兜底定时器」两条路，谁先到算谁、只执行一次：置顶窗口赖在屏幕上不走
+    /// 是比卡顿更糟的事故（它看不见，却会吃掉那一片的点击），所以不能只等 <c>ContentRendered</c>。
+    /// </para>
+    /// </summary>
+    public void PreWarmLayout()
+    {
+        if (IsVisible || _openedByUser)
+        {
+            return;
+        }
+
+        ApplyPanelGeometry();
+        WindowWarmup.PreWarmLayout(this, PanelSize());
+
+        var generation = _visibilityGeneration;
+        var done = false;
+
+        var failsafe = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        failsafe.Tick += (_, _) => Finish();
+
+        void Finish()
+        {
+            if (done)
+            {
+                return;
+            }
+
+            done = true;
+            ContentRendered -= OnWarmed;
+            failsafe.Stop();
+            ShowActivated = true;
+
+            // 期间用户真的按下过（代际号变了）就这次预热说了不算，界面归 ShowLauncher 管。
+            if (generation == _visibilityGeneration)
+            {
+                Hide();
+            }
+        }
+
+        void OnWarmed(object? sender, EventArgs e) => Finish();
+
+        Opacity = 0;
+        ShowActivated = false;
+        ContentRendered += OnWarmed;
+        failsafe.Start();
+        Show();
     }
 
     /// <summary>收起启动台（保留实例与已加载图标）。</summary>
@@ -367,13 +446,17 @@ public partial class LauncherWindow : Window
     }
 
     /// <summary>
-    /// 高斯模糊。传进来的已经是 1/2 分辨率的抓图，所以直接按它自己的尺寸渲染；
-    /// 半径同样除以降采样倍数，铺回面板时的模糊程度才和整分辨率一致。
+    /// 高斯模糊。传进来的已经是 1/2 分辨率的抓图，这里再降一半做（屏幕的 1/4）：
+    /// 像素少四分之三，UI 线程从 20ms 降到 5ms 上下 —— 模糊和淡入动画是同一次开场里跑的，
+    /// 这 20ms 就是一帧半的空隙，肉眼读成「卡了一下」。
+    /// 高斯之后图像已经没有高频，铺回面板时双线性放大看不出差别。
+    /// 半径按这一趟的实际降采样倍数换算，模糊程度才和整分辨率一致。
     /// </summary>
     private static BitmapSource Blur(BitmapSource source)
     {
-        var targetWidth = source.PixelWidth;
-        var targetHeight = source.PixelHeight;
+        const int blurPassDivisor = 2;
+        var targetWidth = Math.Max(1, source.PixelWidth / blurPassDivisor);
+        var targetHeight = Math.Max(1, source.PixelHeight / blurPassDivisor);
 
         var image = new System.Windows.Controls.Image
         {
@@ -382,7 +465,7 @@ public partial class LauncherWindow : Window
             Height = targetHeight,
             Effect = new BlurEffect
             {
-                Radius = FrostBlurRadius / FrostDownscale,
+                Radius = FrostBlurRadius / (FrostDownscale * blurPassDivisor),
                 KernelType = KernelType.Gaussian,
             },
         };

@@ -74,8 +74,7 @@ public static class FullscreenDetector
     /// 判定规则：窗口<b>覆盖</b>整个显示器（需求七的「窗口矩形 == 显示器矩形」在实际游戏上必须放宽成包含关系）。
     /// 用相等会漏：游戏跑非原生分辨率、DWM 的不可见边框、DPI 取整，矩形都会差几像素，
     /// 表现就是全屏时 Dock 直接盖在游戏上面。
-    /// 另加三条必要排除：DWM 已 cloaked 的挂起 UWP 窗口、系统外壳窗口、以及带标题栏的普通最大化窗口
-    /// （任务栏自动隐藏时它也能铺满整屏，不排除的话用户一最大化浏览器 Dock 就没了）。
+    /// 另加两条必要排除：DWM 已 cloaked 的挂起 UWP 窗口、系统外壳窗口。
     /// </summary>
     public static bool IsFullscreen(IntPtr hwnd) => Evaluate(hwnd).Fullscreen;
 
@@ -139,8 +138,16 @@ public static class FullscreenDetector
 
         if (WindowInterop.IsMaximized(hwnd) && WindowInterop.HasCaption(hwnd))
         {
-            // 铺满了却被这一条挡下，是最值得进日志的一种：说明判据可能偏严。
-            return (false, "铺满了，但被当成「最大化 + 带标题栏」的普通窗口");
+            if (mi.rcMonitor.Left == 0 && mi.rcMonitor.Top == 0)
+            {
+                // 主显示器上的最大化窗口：任务栏被接管（或原生任务栏自动隐藏）之后，工作区就是整屏，
+                // 最大化窗口铺满整个显示器，看起来和全屏没有任何区别 —— Dock/任务栏小条照常让路。
+                // 虚拟屏幕坐标系以主显示器原点为 (0,0)，所以左上角为 0 就是主显示器。
+                return (true, "主显示器上铺满整屏的最大化窗口（任务栏已隐藏/接管），按全屏让路");
+            }
+
+            // 副屏没有 Dock 和任务栏小条，副屏上的最大化窗口不需要让路。
+            return (false, "铺满了，但被当成「最大化 + 带标题栏」的普通窗口（不在主显示器）");
         }
 
         return (true, "铺满整个显示器、不是外壳窗口、也没带标题栏");

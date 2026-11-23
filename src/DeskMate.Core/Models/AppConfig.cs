@@ -12,6 +12,16 @@ public class AppConfig
     /// <summary>Dock 图标边长可调上限。</summary>
     public const int DockIconSizeMax = 80;
 
+    /// <summary>
+    /// 设置页「小 / 中 / 大」三档的边长（DIP）。中档就是出厂默认：
+    /// 滑条留着做细调，多数人点一档就够了。
+    /// </summary>
+    public const int DockIconSizeSmall = 32;
+
+    public const int DockIconSizeMedium = 44;
+
+    public const int DockIconSizeLarge = 60;
+
     /// <summary>任务栏遮罩宽度可调范围（DIP）。下限要够盖住开始按钮，上限不到半屏，免得盖到托盘。</summary>
     public const int TaskbarCoverWidthMin = 160;
 
@@ -27,6 +37,22 @@ public class AppConfig
 
     /// <summary>遮罩宽度（DIP），从屏幕左下角往右量。</summary>
     public int TaskbarCoverWidth { get; set; } = 420;
+
+    /// <summary>
+    /// 用自建任务栏顶替系统任务栏：DeskMate 在屏幕底边注册一条自己的 AppBar
+    /// （时间 · 输入法 · 网络 · 音量），并把系统任务栏切到自动隐藏 —— 这是正规的全局设置，
+    /// 退出 DeskMate 时按接管前的状态恢复。开着时与「任务栏遮罩」互斥。
+    /// 托盘图标不迁移（需要原生任务栏时把鼠标移到屏幕最底边唤出）。
+    /// </summary>
+    public bool TaskbarBarEnabled { get; set; } = false;
+
+    /// <summary>
+    /// 「保留托盘」模式（只在 <see cref="TaskbarBarEnabled"/> 开着时生效）：不隐藏整个任务栏，
+    /// 而是把原生任务栏窗口<b>裁</b>成只剩右侧托盘那一段（SetWindowRgn，不是遮挡）——
+    /// 中间的应用图标物理上不存在，动态壁纸原样透出来；时钟、托盘图标、输入法指示照常可用。
+    /// 此模式下右下角自建小条不显示（托盘已有时钟/输入法/网络/音量），自动隐藏保持用户自己的设置。
+    /// </summary>
+    public bool TaskbarKeepTray { get; set; } = false;
 
     /// <summary>开机自启。</summary>
     public bool AutoStart { get; set; } = false;
@@ -49,8 +75,8 @@ public class AppConfig
     /// <summary>Bottom / Left / Right。</summary>
     public string DockPosition { get; set; } = "Bottom";
 
-    /// <summary>Dock 图标边长（DIP），40~80。</summary>
-    public int DockIconSize { get; set; } = 56;
+    /// <summary>Dock 图标边长（DIP），可调 24~80，默认取「中」那一档。</summary>
+    public int DockIconSize { get; set; } = DockIconSizeMedium;
 
     /// <summary>Dock 背景不透明度，0~1。</summary>
     public double DockOpacity { get; set; } = 0.9;

@@ -31,6 +31,16 @@ public interface IWindowService
     /// </summary>
     Task<bool> SwitchToAsync(string executablePath);
 
+    /// <summary>
+    /// 应用缩在托盘（进程在、可见窗口一个没有）时，把它的主窗口捞回来。
+    /// <para>
+    /// 只捞「像主窗口」的隐藏窗口（带标题栏、面积够大），系统认的 MainWindowHandle 也会补进来试；
+    /// 捞回后立刻验证真的可见了才算成功 —— 捞不回来返回 false，调用方再走启动。
+    /// 没有这一步的话，微信 4 这类允许多开的程序，用户每点一次图标就是第二个登录进程。
+    /// </para>
+    /// </summary>
+    Task<bool> RestoreFromTrayAsync(string executablePath);
+
     /// <summary>直接激活指定窗口，用于预览卡片被点击。</summary>
     bool Activate(AppWindowInfo window);
 
@@ -46,4 +56,11 @@ public interface IWindowService
     /// 不能让用户点了「关闭窗口」之后什么都不发生。
     /// </summary>
     Task<int> CloseAllAsync(string executablePath);
+
+    /// <summary>
+    /// 强制结束某个应用的所有进程（整棵进程树）。不走 WM_CLOSE，程序没有机会弹「保存吗」，
+    /// 未保存的数据直接丢 —— 只该用在「关闭窗口」关不掉或用户明确要杀的场合。
+    /// 返回成功结束的进程数。
+    /// </summary>
+    Task<int> KillAsync(string executablePath);
 }

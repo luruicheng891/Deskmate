@@ -23,7 +23,7 @@ public class FilePreviewPanelTests : IDisposable
     {
         var config = new ConfigService(NullLogger<ConfigService>.Instance, _temp.File("config.json"));
         _folders = new FolderService(config, NullLogger<FolderService>.Instance);
-        _viewModel = new FolderManagerViewModel(_folders, _launcher, _desktop, new FakeFileOperations(), config, NullLogger<FolderManagerViewModel>.Instance);
+        _viewModel = new FolderManagerViewModel(_folders, _launcher, _desktop, new FakeFileOperations(), new FakeIconService(), config, NullLogger<FolderManagerViewModel>.Instance);
     }
 
     public void Dispose() => _temp.Dispose();
@@ -70,7 +70,10 @@ public class FilePreviewPanelTests : IDisposable
         // 界面就停在第一次求值的结果上（列表一直收着、内容页盖满整栏，自检真就这么红过一次）。
         Assert.Contains(nameof(FolderManagerViewModel.IsFilePreviewOpen), changed);
         Assert.Contains(nameof(FolderManagerViewModel.Breadcrumbs), changed);
-        Assert.Contains(nameof(FolderManagerViewModel.BrowseTitle), changed);
+
+        // 地址栏那一格显示面包屑还是文本，是这两个派生名决定的：不重发就停在第一次求值的结果上。
+        Assert.Contains(nameof(FolderManagerViewModel.IsAddressSegmentsVisible), changed);
+        Assert.Contains(nameof(FolderManagerViewModel.IsAddressPlainTextVisible), changed);
     }
 
     [Fact]

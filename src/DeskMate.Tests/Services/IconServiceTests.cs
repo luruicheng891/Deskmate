@@ -54,6 +54,75 @@ public class IconServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetTypeIcon_SharesOneBitmap_AcrossFilesOfTheSameType()
+    {
+        var service = Create();
+        var folder = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"deskmate-typeicon-{Guid.NewGuid():N}"));
+        try
+        {
+            var first = Path.Combine(folder.FullName, "甲.txt");
+            var second = Path.Combine(folder.FullName, "乙.txt");
+            File.WriteAllText(first, "a");
+            File.WriteAllText(second, "b");
+
+            var iconA = await service.GetTypeIconAsync(first, isDirectory: false, 16);
+            var iconB = await service.GetTypeIconAsync(second, isDirectory: false, 16);
+
+            // 同一种扩展名在资源管理器里就是同一个图标：只许问一次 Shell。
+            Assert.NotNull(iconA);
+            Assert.Same(iconA, iconB);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GetTypeIcon_Directory_GetsTheFolderIcon_AndSharesIt()
+    {
+        var service = Create();
+        var a = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"deskmate-diricon-{Guid.NewGuid():N}"));
+        var b = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"deskmate-diricon-{Guid.NewGuid():N}"));
+        try
+        {
+            var iconA = await service.GetTypeIconAsync(a.FullName, isDirectory: true, 32);
+            var iconB = await service.GetTypeIconAsync(b.FullName, isDirectory: true, 32);
+
+            Assert.NotNull(iconA);
+            Assert.Same(iconA, iconB);
+        }
+        finally
+        {
+            a.Delete();
+            b.Delete();
+        }
+    }
+
+    [Fact]
+    public async Task GetTypeIcon_AFileAndAFolder_DoNotShareAnIcon()
+    {
+        var service = Create();
+        var folder = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"deskmate-typeicon-{Guid.NewGuid():N}"));
+        try
+        {
+            var file = Path.Combine(folder.FullName, "说明.txt");
+            File.WriteAllText(file, "x");
+
+            var fileIcon = await service.GetTypeIconAsync(file, isDirectory: false, 32);
+            var folderIcon = await service.GetTypeIconAsync(folder.FullName, isDirectory: true, 32);
+
+            Assert.NotNull(fileIcon);
+            Assert.NotNull(folderIcon);
+            Assert.NotSame(fileIcon, folderIcon);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ClearCache_ForcesReextraction()
     {
         var service = Create();

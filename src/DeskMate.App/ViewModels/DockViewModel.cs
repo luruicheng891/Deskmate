@@ -1,5 +1,9 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using DeskMate.App.Services;
@@ -49,12 +53,16 @@ public sealed partial class DockViewModel : ObservableObject
     /// </summary>
     private const double HoverMagnification = 1.35;
 
+    /// <summary>图标头顶原本就有的余量：外壳外边距 8 + 内容条内边距 6。</summary>
+    private const double ChromeTopSlack = 14;
+
     private readonly IConfigService _config;
     private readonly IIconService _icons;
     private readonly IAppLauncherService _launcher;
     private readonly IProcessProbeService _probe;
     private readonly IWindowService _windows;
     private readonly IUsageService _usage;
+    private readonly MediaSmtcWatcher _media;
     private readonly ILogger<DockViewModel> _logger;
     private readonly DispatcherTimer _pollTimer;
     private readonly DispatcherTimer _eventDebounceTimer;
@@ -85,6 +93,21 @@ public sealed partial class DockViewModel : ObservableObject
     /// <summary>运行区当前的显示顺序（进程启动时间升序）。</summary>
     private readonly List<string> _runningOrder = new();
 
+    /// <summary>音乐控件的稳定 Id：不进配置，每次重建 desired 都插同一个实例。</summary>
+    private const string MusicItemId = "widget:music";
+
+    /// <summary>音乐控件：唯一一个非应用的格子，实例常驻避免重建闪烁。</summary>
+    private DockItemViewModel? _musicItem;
+
+    /// <summary>音乐控件是否参与显示；测试里关掉，免得纯排序断言多出一个「音乐」。</summary>
+    public bool MusicWidgetEnabled { get; set; } = true;
+
+    /// <summary>封面缓存：键 = 「标题|歌手」，值 = 解码后的位图。</summary>
+    private readonly Dictionary<string, BitmapSource> _musicCoverCache;
+
+    /// <summary>没有封面时的默认音符图标，懒生成（要动 UI 对象，得在 UI 线程）。</summary>
+    private BitmapSource? _musicPlaceholder;
+
     /// <summary>构造 Dock 视图模型。</summary>
     public DockViewModel(
         IConfigService config,
@@ -93,6 +116,7 @@ public sealed partial class DockViewModel : ObservableObject
         IProcessProbeService probe,
         IWindowService windows,
         IUsageService usage,
+        MediaSmtcWatcher media,
         ILogger<DockViewModel> logger)
     {
         _config = config;
@@ -101,8 +125,16 @@ public sealed partial class DockViewModel : ObservableObject
         _probe = probe;
         _windows = windows;
         _usage = usage;
+        _media = media;
         _logger = logger;
         _dispatcher = Dispatcher.CurrentDispatcher;
+
+        // 音乐控件：SMTC 监听是全局的，Dock 一加载就跟着启动。
+        _media.NowPlayingChanged += OnMusicChanged;
+        _media.Start();
+
+        // 音乐控件的封面缓存：同一首歌的封面字节不变，播放状态来回切不必反复解码。
+        _musicCoverCache = new Dictionary<string, BitmapSource>();
 
         // Background 优先级：轮询只是补图标，不该和悬停动画抢渲染。
         _pollTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -127,11 +159,29 @@ public sealed partial class DockViewModel : ObservableObject
     public event EventHandler<NoticeEventArgs>? UserNotice;
 
     [ObservableProperty]
-    private double _iconSize = 56;
+    [NotifyPropertyChangedFor(nameof(ShellMargin))]
+    private double _iconSize = AppConfig.DockIconSizeMedium;
 
     /// <summary>Dock 是否竖着贴边。分隔线要跟着换方向，所以让 XAML 能绑到它。</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShellMargin))]
     private bool _isVertical;
+
+    /// <summary>
+    /// 外壳（背景条与内容条）的外边距。上边要额外补一段悬停放大的生长量：
+    /// 图标是<b>底对齐向上</b>长 1.35 倍（见 DockItemControl 的 RenderTransformOrigin 0.5,1），
+    /// 而窗口按布局尺寸裁内容 —— 头顶只有 14px 余量时，44 以上的图标一放大就被切掉一条。
+    /// 竖着贴边时向上生长落在条内（顶多压到上一个图标），不需要额外余量。
+    /// </summary>
+    public Thickness ShellMargin => new(8, 8 + HoverHeadroom, 8, 8);
+
+    /// <summary>
+    /// 悬停时图标向上多长出来的那一截（DIP）。窗口按布局尺寸裁内容，
+    /// 自检量的就是「图标头顶到窗口上沿」够不够这一段。
+    /// </summary>
+    public double HoverGrowth => IconSize * (HoverMagnification - 1);
+
+    private double HoverHeadroom => IsVertical ? 0 : Math.Max(0, HoverGrowth - ChromeTopSlack);
 
     /// <summary>从配置载入固定项，再补齐图标与运行状态。</summary>
     public async Task LoadAsync()
@@ -323,6 +373,25 @@ public sealed partial class DockViewModel : ObservableObject
         RebuildItems();
     }
 
+    /// <summary>拖拽期间实时换位：只动显示集合（ObservableCollection.Move，容器跟着条目走，不重建）。</summary>
+    public void MoveItemLive(string id, int targetIndex)
+    {
+        var item = Find(id);
+        if (item is null)
+        {
+            return;
+        }
+
+        var old = Items.IndexOf(item);
+        var clamped = Math.Clamp(targetIndex, 0, Items.Count - 1);
+        if (old < 0 || old == clamped)
+        {
+            return;
+        }
+
+        Items.Move(old, clamped);
+    }
+
     /// <summary>按给定 Id 顺序重排并落盘。运行区的临时项不在配置里，忽略掉。</summary>
     public async Task ReorderAsync(IEnumerable<string> orderedIds)
     {
@@ -384,6 +453,15 @@ public sealed partial class DockViewModel : ObservableObject
                 return;
             }
 
+            // 进程在、可见窗口一个没有（缩回托盘）：先把主窗口捞回来试试，别急着开新实例。
+            // 微信 4 这类允许多开的程序，再点一次图标就是第二个登录进程，比什么白框都糟。
+            if (await _windows.RestoreFromTrayAsync(ExecutableOf(item)))
+            {
+                _usage.Record(item.ExecutablePath.ToUpperInvariant());
+                _logger.LogDebug("Dock 点「{Name}」：{Ms:F0} ms 从托盘捞回主窗口", item.DisplayName, fromClick.Elapsed.TotalMilliseconds);
+                return;
+            }
+
             _launcher.Launch(item.TargetPath);
             _usage.Record(item.ExecutablePath.ToUpperInvariant());
             item.IsRunning = true;
@@ -441,6 +519,38 @@ public sealed partial class DockViewModel : ObservableObject
         {
             _logger.LogError(ex, "关闭窗口失败 {Path}", item.TargetPath);
             OnUserNotice($"关闭窗口失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 右键「结束进程」：强制结束这个应用的所有进程（整棵进程树）。不走 WM_CLOSE，
+    /// 程序没有机会弹「保存吗」，未保存的数据直接丢 —— 所以菜单位置放在「关闭窗口」下面，
+    /// 路径核对不过关的进程（读不到 exe 路径）一律跳过，不误杀。
+    /// </summary>
+    public async Task KillProcessAsync(string id)
+    {
+        var item = Find(id);
+        if (item is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var killed = await _windows.KillAsync(ExecutableOf(item));
+
+            OnUserNotice(
+                killed > 0
+                    ? $"已结束「{item.DisplayName}」的 {killed} 个进程"
+                    : $"没有找到「{item.DisplayName}」可结束的进程（可能已经退出了）",
+                killed > 0 ? ToastKind.Success : ToastKind.Info);
+
+            await RefreshRunningStateAsync(checkPathsOnDisk: false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "结束进程失败 {Path}", item.TargetPath);
+            OnUserNotice($"结束进程失败：{ex.Message}");
         }
     }
 
@@ -898,6 +1008,13 @@ public sealed partial class DockViewModel : ObservableObject
         }
 
         desired.AddRange(_pinned);
+
+        // 音乐控件：固定占从左往右第三个格位（启动台、文件夹按钮之后的第一格）。
+        if (MusicWidgetEnabled)
+        {
+            desired.Insert(0, EnsureMusicItem());
+        }
+
         return desired;
     }
 
@@ -945,6 +1062,143 @@ public sealed partial class DockViewModel : ObservableObject
         }
 
         return length;
+    }
+
+    /// <summary>音乐控件单击：暂停 / 播放切换（命令转发给 SMTC 监听器）。</summary>
+    public Task ToggleMusicAsync() => _media.ToggleAsync();
+
+    /// <summary>音乐控件滚轮：向上上一首、向下下一首。</summary>
+    public Task SkipMusic(int delta) => delta > 0 ? _media.NextAsync() : _media.PreviousAsync();
+
+    /// <summary>音乐控件实例：常驻单例，重建 desired 时插回原位，避免闪烁。</summary>
+    private DockItemViewModel EnsureMusicItem()
+    {
+        if (_musicItem is null)
+        {
+            _musicItem = new DockItemViewModel(this, MusicItemId, "音乐", targetPath: "", isPinned: false)
+            {
+                IsMusicWidget = true,
+                IconSize = IconSize,
+                Icon = GetMusicPlaceholder(),
+            };
+        }
+
+        _musicItem.IconSize = IconSize;
+        return _musicItem;
+    }
+
+    /// <summary>SMTC 摘要变化（WinRT 线程回调）：调度回 UI 线程再改图标。</summary>
+    private void OnMusicChanged(MusicNowPlaying? playing) => _dispatcher.BeginInvoke(() => UpdateMusicItem(playing));
+
+    /// <summary>把「正在播放」刷到音乐控件上：封面优先，没有封面退化成音符。</summary>
+    private void UpdateMusicItem(MusicNowPlaying? playing)
+    {
+        var item = EnsureMusicItem();
+
+        if (playing is null)
+        {
+            item.Icon = GetMusicPlaceholder();
+            item.MusicTooltip = "音乐控件 · 有播放器放歌时会显示封面\n单击：暂停 / 播放 · 滚轮：上一首 / 下一首";
+            return;
+        }
+
+        var key = playing.Title + "|" + playing.Artist;
+        if (!_musicCoverCache.TryGetValue(key, out var cover))
+        {
+            cover = DecodeCover(playing.Cover) ?? GetMusicPlaceholder();
+            _musicCoverCache[key] = cover;
+            if (_musicCoverCache.Count > 32)
+            {
+                // 缓存只用于避免同一首歌反复解码，攒多了直接清空重新解，不值得做 LRU。
+                _musicCoverCache.Clear();
+                _musicCoverCache[key] = cover;
+            }
+        }
+
+        item.Icon = cover;
+        item.MusicTooltip = $"{(playing.IsPlaying ? "正在播放" : "已暂停")}：{playing.Title}"
+                            + (string.IsNullOrWhiteSpace(playing.Artist) ? string.Empty : $" - {playing.Artist}")
+                            + "\n单击：暂停 / 播放 · 滚轮：上一首 / 下一首";
+        _logger.LogInformation(
+            "音乐控件已更新：{Title}，封面={CoverSource}，缓存数={Count}",
+            playing.Title, cover == _musicPlaceholder ? "音符占位" : "专辑封面", _musicCoverCache.Count);
+    }
+
+    /// <summary>封面字节解码成位图；失败返回 null，由调用方退化成音符。</summary>
+    private static BitmapSource? DecodeCover(byte[]? bytes)
+    {
+        if (bytes is null || bytes.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var image = new BitmapImage();
+            using var stream = new MemoryStream(bytes);
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.DecodePixelWidth = 128;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            // 封面是满幅方图，应用图标自带透明圆角画布——把封面也裁成同样的圆角，排在一起才协调。
+            return RoundCorners(image);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>位图四角按 22% 短边比例裁圆，视觉上和 Win11 风格的应用图标一致。</summary>
+    private static BitmapSource RoundCorners(BitmapSource source)
+    {
+        var width = source.PixelWidth;
+        var height = source.PixelHeight;
+        var radius = Math.Min(width, height) * 0.22;
+        var visual = new DrawingVisual();
+        using (var context = visual.RenderOpen())
+        {
+            context.PushClip(new RectangleGeometry(new Rect(0, 0, width, height), radius, radius));
+            context.DrawImage(source, new Rect(0, 0, width, height));
+            context.Pop();
+        }
+
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
+    /// <summary>没有媒体会话时的默认音符图标（48px，随 Dock 图标统一缩放）。</summary>
+    private BitmapSource GetMusicPlaceholder()
+    {
+        if (_musicPlaceholder is not null)
+        {
+            return _musicPlaceholder;
+        }
+
+        const double size = 48;
+        var visual = new DrawingVisual();
+        using (var context = visual.RenderOpen())
+        {
+            var text = new FormattedText(
+                "\u266B",
+                CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight,
+                new Typeface(new FontFamily("Segoe UI Symbol"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
+                size * 0.6,
+                new SolidColorBrush(Color.FromArgb(210, 0x9A, 0xA3, 0xAD)),
+                1.25);
+            context.DrawText(text, new Point((size - text.Width) / 2, (size - text.Height) / 2));
+        }
+
+        var bitmap = new RenderTargetBitmap((int)size, (int)size, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        bitmap.Freeze();
+        _musicPlaceholder = bitmap;
+        return bitmap;
     }
 
     /// <summary>运行区与固定区之间画一条分隔线，免得「图标自己冒出来」看起来像故障。</summary>
